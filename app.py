@@ -12,13 +12,16 @@ import urllib.parse
 import re
 import os
 import requests
-from bs4 import BeautifulSoup # Pour lire les sites web
+from bs4 import BeautifulSoup
+import wikipedia
+import pdfplumber # <--- LE LECTEUR DE DOCUMENTS PDF
+from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="AquaRisk 5.0 : Audit Universel", page_icon="🌐", layout="wide")
-st.title("🌐 AquaRisk 5.0 : Audit Entreprises (Cotées & Non Cotées)")
+st.set_page_config(page_title="AquaRisk 7.0 : Data Room", page_icon="🗂️", layout="wide")
+st.title("🗂️ AquaRisk 7.0 : Audit Intégral (Data Room)")
 
-# --- MÉMOIRE ---
+# --- INITIALISATION ---
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 
 # --- 1. CHARGEMENT DATA (ROBUSTE) ---
@@ -37,31 +40,26 @@ def load_data():
         return None
 
     df_now = smart_read("risk_actuel.csv")
-    if df_now is not None:
-        if 'score' in df_now.columns:
-            df_now['score'] = pd.to_numeric(df_now['score'].astype(str).str.replace(',', '.'), errors='coerce')
-        if 'indicator_name' in df_now.columns:
-            df_now = df_now[df_now['indicator_name'] == 'bws']
+    if df_now is not None and 'score' in df_now.columns:
+        df_now['score'] = pd.to_numeric(df_now['score'].astype(str).str.replace(',', '.'), errors='coerce')
+        if 'indicator_name' in df_now.columns: df_now = df_now[df_now['indicator_name'] == 'bws']
 
     df_fut = smart_read("risk_futur.csv")
-    if df_fut is not None:
-        if 'score' in df_fut.columns:
-            df_fut['score'] = pd.to_numeric(df_fut['score'].astype(str).str.replace(',', '.'), errors='coerce')
+    if df_fut is not None and 'score' in df_fut.columns:
+        df_fut['score'] = pd.to_numeric(df_fut['score'].astype(str).str.replace(',', '.'), errors='coerce')
         if 'year' in df_fut.columns:
             mask = (df_fut['year'] == 2030) & (df_fut['scenario'] == 'bau') & (df_fut['indicator_name'] == 'bws')
             df_fut = df_fut[mask]
-
     return df_now, df_fut
 
 try:
     df_actuel, df_futur = load_data()
 except: st.stop()
-
 if df_actuel is None or df_futur is None: st.stop()
 
-# --- 2. FONCTIONS GÉO ---
+# --- 2. FONCTIONS TECH ---
 def get_location_safe(ville, pays):
-    agents = ["Auditor_Web_1", "Risk_Tool_V5", "Global_Scanner"]
+    agents = ["Auditor_V7", "Doc_Reader", "Risk_Scanner"]
     for i in range(3):
         try:
             ua = f"{agents[i]}_{randint(100,999)}"
@@ -78,44 +76,68 @@ def get_region_safe(lat, lon):
         return geolocator.reverse(f"{lat}, {lon}", language='en')
     except: return None
 
-# --- 3. MOTEUR WEB SCRAPER (NOUVEAU !) ---
+# --- 3. MODULES EXTERNES (WEB, WIKI, METEO) ---
+def get_weather_history(lat, lon):
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+    url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start}&end_date={end}&daily=precipitation_sum&timezone=auto"
+    try:
+        r = requests.get(url, timeout=5)
+        d = r.json()
+        if 'daily' in d and 'precipitation_sum' in d['daily']:
+            return sum([x for x in d['daily']['precipitation_sum'] if x is not None])
+    except: return None
+    return None
+
+def get_wiki_summary(company_name, lang='fr'):
+    wikipedia.set_lang(lang)
+    try:
+        return wikipedia.page(company_name).summary[:1000]
+    except: return ""
+
 def scan_website(url):
     if not url or len(url) < 5: return ""
-    
-    # On ajoute http si l'utilisateur l'a oublié
     if not url.startswith("http"): url = "https://" + url
-    
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'}
-    
     try:
-        # On essaie de lire la page avec un timeout de 5 secondes
-        response = requests.get(url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # On prend tout le texte des paragraphes
-            text = ' '.join([p.text for p in soup.find_all('p')])
-            return text[:5000] # On limite aux 5000 premiers caractères
-    except:
-        return "" # Si échec (site sécurisé ou introuvable), on renvoie vide
+        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, 'html.parser')
+            return ' '.join([p.text for p in soup.find_all('p')])[:4000]
+    except: return ""
     return ""
 
-# --- 4. MOTEUR NEWS (RSS) ---
 def get_company_news(company_name):
     query = urllib.parse.quote(f"{company_name} water environment")
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-    def clean_html(raw):
-        cleanr = re.compile('<.*?>')
-        return re.sub(cleanr, '', raw).replace("&nbsp;", " ").replace("&#39;", "'")
+    def clean(r): return re.sub(re.compile('<.*?>'), '', r).replace("&nbsp;", " ").replace("&#39;", "'")
     try:
         feed = feedparser.parse(rss_url)
-        items = []
-        for entry in feed.entries[:5]:
-            summary = clean_html(entry.summary if 'summary' in entry else entry.title)
-            items.append({"title": entry.title, "link": entry.link, "summary": summary[:200]})
-        return items
+        return [{"title": e.title, "link": e.link, "summary": clean(e.summary if 'summary' in e else e.title)[:200]} for e in feed.entries[:5]]
     except: return []
 
-# --- 5. MOTEUR ANALYSE ---
+# --- 4. MODULE LECTURE PDF (NOUVEAU) ---
+def extract_text_from_pdfs(uploaded_files):
+    full_text = ""
+    file_names = []
+    
+    if not uploaded_files:
+        return "", []
+
+    for pdf_file in uploaded_files:
+        try:
+            with pdfplumber.open(pdf_file) as pdf:
+                text = ""
+                # On lit max 10 pages pour ne pas surcharger la mémoire
+                for page in pdf.pages[:10]:
+                    text += page.extract_text() or ""
+                full_text += text + " "
+                file_names.append(pdf_file.name)
+        except Exception as e:
+            st.error(f"Erreur lecture {pdf_file.name}: {e}")
+            
+    return full_text, file_names
+
+# --- 5. MOTEUR CENTRAL ---
 def analyser_site(ville, pays, region_forcee=None):
     loc = get_location_safe(ville, pays)
     if not loc: return None
@@ -128,8 +150,7 @@ def analyser_site(ville, pays, region_forcee=None):
     
     region_final = region_forcee if region_forcee else reg_auto
     
-    if 'name_0' not in df_actuel.columns: return None
-
+    # Matching CSV
     mask_pays = df_actuel['name_0'].astype(str).str.lower().str.contains(pays.lower().strip(), na=False)
     df_pays = df_actuel[mask_pays]
     match_now = df_pays[df_pays['name_1'].astype(str).str.lower().str.contains(region_final.lower().strip(), na=False)]
@@ -138,128 +159,147 @@ def analyser_site(ville, pays, region_forcee=None):
     df_f_pays = df_futur[mask_pays_f]
     match_fut = df_f_pays[df_f_pays['name_1'].astype(str).str.lower().str.contains(region_final.lower().strip(), na=False)]
 
-    s25 = match_now['score'].mean() if not match_now.empty else 0
-    s30 = match_fut['score'].mean() if not match_fut.empty else 0
-    
     return {
         "ent": "N/A", "ville": ville, "pays": pays, "region": region_final,
         "lat": loc.latitude, "lon": loc.longitude,
-        "s25": s25, "s30": s30, "found": not match_now.empty
+        "s25": match_now['score'].mean() if not match_now.empty else 0,
+        "s30": match_fut['score'].mean() if not match_fut.empty else 0,
+        "found": not match_now.empty
     }
 
-# --- 6. PDF ---
+# --- 6. PDF REPORT ---
 def create_pdf(data):
-    def clean(t):
-        t = str(t).replace("✅", "[OK]").replace("⚠️", "[!]").replace("🚨", "[ALRT]").replace("ℹ️", "[INFO]").replace("’", "'")
-        return t.encode('latin-1', 'replace').decode('latin-1')
-
+    def clean(t): return str(t).encode('latin-1', 'replace').decode('latin-1')
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, clean(f"AUDIT AQUARISK: {data['ent'].upper()}"), ln=1, align='C')
+    pdf.cell(0, 10, clean(f"AUDIT 7.0: {data['ent'].upper()}"), ln=1, align='C')
     pdf.ln(10)
+    
     pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, clean(f"Site: {data['loc']}"), ln=1)
-    pdf.cell(0, 10, clean(f"Capital/CA Expose: {data['var']:,.0f} $"), ln=1)
-    if data.get('website_url'):
-        pdf.cell(0, 10, clean(f"Source Web: {data['website_url']}"), ln=1)
+    pdf.cell(0, 10, clean(f"Loc: {data['loc']}"), ln=1)
+    if data['pluie_90j']: pdf.cell(0, 10, clean(f"Pluie (90j): {data['pluie_90j']} mm"), ln=1)
+    
+    if data['doc_files']:
+        pdf.cell(0, 10, clean(f"Docs Analyses: {', '.join(data['doc_files'])}"), ln=1)
+        
     pdf.ln(5)
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, f"Score Risque 2025: {data['s25_display']:.2f} / 5", ln=1)
-    pdf.cell(0, 10, f"Projection 2030: {data['s30_display']:.2f} / 5", ln=1)
+    pdf.cell(0, 10, f"Score Final: {data['s25_display']:.2f} / 5", ln=1)
     pdf.ln(5)
     pdf.set_font("Arial", 'I', 10)
-    pdf.multi_cell(0, 8, clean(f"Analyse IA (Web+News):\n{data['txt_ia']}"))
+    pdf.multi_cell(0, 8, clean(f"Synthese IA:\n{data['txt_ia']}"))
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
 # --- 7. INTERFACE ---
-st.info("💡 Mode Universel : Fonctionne pour les entreprises cotées (Stock) et non-cotées (PME/ETI).")
-
 c1, c2 = st.columns([1, 2])
 with c1:
-    st.subheader("🔎 Paramètres Audit")
-    ent = st.text_input("Nom de l'Entreprise", "Ferme Bio du Sud")
-    website = st.text_input("Site Web (Optionnel)", placeholder="www.ferme-exemple.com")
-    v = st.text_input("Ville", "Avignon")
+    st.subheader("📁 Documents & Cible")
+    
+    ent = st.text_input("Entreprise", "TotalEnergies")
+    website = st.text_input("Site Web", "")
+    v = st.text_input("Ville", "Pau")
     p = st.text_input("Pays", "France")
-    reg = st.text_input("Région (Si connue)", "Provence-Alpes-Côte d'Azur")
-    cap = st.number_input("Montant Investissement / CA ($)", 500000)
+    reg = st.text_input("Région", "Nouvelle-Aquitaine")
+    cap = st.number_input("Exposition ($)", 1000000)
     
     st.markdown("---")
-    notes = st.text_area("Notes manuelles", height=50)
+    st.write("📂 **Data Room (Compta / RSE / Technique)**")
+    uploaded_docs = st.file_uploader("Glissez vos PDF ici (Bilan, Rapport...)", type=["pdf"], accept_multiple_files=True)
     
-    if st.button("🚀 Lancer l'Audit Web"):
-        with st.spinner("🌍 Scan GPS + 🕷️ Analyse Site Web + 📰 News..."):
+    if st.button("Lancer l'Audit Data Room"):
+        with st.spinner("Analyse: 🛰️GPS 🕷️Web 🌦️Météo 📄Lecture Docs..."):
             res = analyser_site(v, p, reg)
             
             if res and res['found']:
-                # 1. Sources de texte
+                # 1. DATA GATHERING
                 news = get_company_news(ent)
-                web_text = scan_website(website) # <--- LE ROBOT SCANNE LE SITE ICI
+                web_txt = scan_website(website)
+                wiki_txt = get_wiki_summary(ent, 'fr')
+                pluie = get_weather_history(res['lat'], res['lon'])
                 
-                # 2. Construction du corpus pour l'IA
-                full_text = notes + " " + web_text + " " + " ".join([n['title'] + " " + n['summary'] for n in news])
+                # --- LE CŒUR DE LA V7 : LECTURE DOCS ---
+                doc_text, doc_names = extract_text_from_pdfs(uploaded_docs)
                 
-                # 3. Analyse Sémantique
-                m_pos = ['recyclage', 'goutte-à-goutte', 'économie', 'biologique', 'durable', 'certification', 'reduce', 'recycle']
-                m_neg = ['sécheresse', 'restriction', 'arrêté', 'prélèvement', 'conflit', 'pollué', 'drought', 'fine']
+                # 2. IA ANALYSE
+                corpus = f"{web_txt} {wiki_txt} {doc_text} {' '.join([n['title'] for n in news])}"
+                
+                # Mots clés Environnementaux
+                m_pos = ['durable', 'iso 14001', 'recyclage', 'économie', 'traitement', 'épuration']
+                m_neg = ['pollution', 'rejet', 'dépassement', 'non-conformité', 'plainte', 'fuite']
+                
+                # Mots clés FINANCIERS (Nouveau !)
+                m_finance_risk = ['provision pour risque', 'litige en cours', 'amende', 'redressement', 'dommages et intérêts']
+                
+                s_pos = sum(1 for w in m_pos if w in corpus.lower())
+                s_neg = sum(1 for w in m_neg if w in corpus.lower())
+                s_fin_risk = sum(1 for w in m_finance_risk if w in corpus.lower())
                 
                 bonus = 0.0
-                txt_ia = "Neutre (Pas assez d'infos web/presse)."
+                txt = "Analyse neutre."
                 
-                if len(full_text) > 20:
-                    s_pos = sum(1 for w in m_pos if w in full_text.lower())
-                    s_neg = sum(1 for w in m_neg if w in full_text.lower())
-                    
-                    if s_pos > s_neg: 
-                        bonus = 0.15
-                        txt_ia = f"✅ Stratégie Positive détectée ({s_pos} mentions sur le site/news)."
-                    elif s_neg > s_pos: 
-                        bonus = -0.10
-                        txt_ia = f"⚠️ Risques identifiés dans les textes ({s_neg} mentions négatives)."
-                elif website and len(web_text) < 10:
-                    txt_ia = "⚠️ Le site web n'a pas pu être lu (protection ou vide)."
+                # Bonus Hydrologie
+                if pluie is not None and pluie < 50: bonus -= 0.10
+                
+                # Bonus Sémantique
+                if s_pos > s_neg:
+                    bonus += 0.10
+                    txt = "✅ Tendance positive (Docs/Web)."
+                elif s_neg > s_pos:
+                    bonus -= 0.10
+                    txt = "⚠️ Tendance négative détectée."
+                
+                # MALUS FINANCIER (Prioritaire)
+                if s_fin_risk > 0:
+                    bonus -= 0.20 # Gros malus
+                    txt += f"\n🚨 ALERTE COMPTABLE : {s_fin_risk} mentions de risques financiers (provisions/litiges) détectées dans les documents !"
 
-                # 4. Finalisation
+                # 3. RESULTATS
                 res['ent'] = ent
-                res['website_url'] = website
+                res['pluie_90j'] = pluie
+                res['doc_files'] = doc_names
                 res['s25_brut'] = res['s25']
                 res['s25_display'] = res['s25'] * (1 - bonus)
                 res['s30_display'] = res['s30'] * (1 - bonus)
                 res['var'] = cap * (res['s25_display'] / 5)
-                res['txt_ia'] = txt_ia
+                res['txt_ia'] = txt
                 res['news'] = news
-                res['loc'] = f"{res['ville']}, {res['region']}, {res['pays']}"
+                res['wiki'] = wiki_txt[:500] if wiki_txt else None
+                res['loc'] = f"{res['ville']}, {res['pays']}"
                 
                 st.session_state.audit_unique = res
                 st.rerun()
             else:
-                st.error("❌ Localisation introuvable.")
+                st.error("Lieu introuvable.")
 
 with c2:
     if st.session_state.audit_unique:
         r = st.session_state.audit_unique
-        st.success(f"Audit : {r['ent']}")
+        st.success(f"Audit Data Room : {r['ent']}")
         
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Risque Ajusté", f"{r['s25_display']:.2f}/5", delta=f"Physique: {r['s25_brut']:.2f}", delta_color="inverse")
-        k2.metric("Horizon 2030", f"{r['s30_display']:.2f}/5")
-        k3.metric("Capital à Risque", f"{r['var']:,.0f} $")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Score Audit", f"{r['s25_display']:.2f}/5", delta=f"Base: {r['s25_brut']:.2f}", delta_color="inverse")
+        c2.metric("Météo", f"{r['pluie_90j']} mm" if r['pluie_90j'] else "N/A")
+        c3.metric("VaR", f"{r['var']:,.0f} $")
         
-        with st.expander("📝 Analyse Textuelle (Site + News)", expanded=True):
-            st.info(f"🤖 **IA :** {r['txt_ia']}")
-            if r.get('website_url'):
-                st.caption(f"Source Web analysée : {r['website_url']}")
-            
-            if r['news']:
-                st.write("**Dernières Actualités :**")
-                for n in r['news']:
-                    st.markdown(f"- [{n['title']}]({n['link']})")
+        st.info(f"🤖 **Synthèse :** {r['txt_ia']}")
+        
+        if r['doc_files']:
+            st.write(f"📂 **Documents analysés :** {', '.join(r['doc_files'])}")
+        
+        # Onglets
+        t1, t2, t3 = st.tabs(["📄 Contenu Docs", "📰 News", "📚 Wiki"])
+        with t1: 
+            st.caption("Le texte des PDF a été scanné pour chercher des provisions financières et risques légaux.")
+        with t2:
+            for n in r['news']: st.markdown(f"- [{n['title']}]({n['link']})")
+        with t3:
+            if r['wiki']: st.write(r['wiki'] + "...")
 
         m = folium.Map([r['lat'], r['lon']], zoom_start=9, tiles="cartodbpositron")
-        folium.Marker([r['lat'], r['lon']], popup=r['ent'], icon=folium.Icon(color="red" if r['s25_display']>3 else "green")).add_to(m)
-        st_folium(m, height=300)
+        folium.Marker([r['lat'], r['lon']], icon=folium.Icon(color="red")).add_to(m)
+        st_folium(m, height=250)
         
-        pdf_bytes = create_pdf(r)
-        st.download_button("📄 Télécharger Audit PDF", pdf_bytes, file_name=f"Audit_{r['ent']}.pdf", mime="application/pdf")
+        pdf = create_pdf(r)
+        st.download_button("📄 Rapport Audit Complet", pdf, file_name="Audit.pdf")
         
