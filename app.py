@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
+from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
 import folium
 from streamlit_folium import st_folium
 import time
@@ -11,261 +11,258 @@ import io
 import feedparser
 import urllib.parse
 import re
-import os  # Pour le diagnostic de fichiers
+import os
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="AquaRisk 4.2", page_icon="💧", layout="wide")
-st.title("💧 AquaRisk 4.2 : Monitoring & Diagnostic")
+# --- 1. CONFIGURATION DE LA PAGE ---
+st.set_page_config(page_title="AquaRisk 4.3 : Stable", page_icon="🛡️", layout="wide")
+st.title("🛡️ AquaRisk 4.3 : Version Stable & Blindée")
 
-# --- INITIALISATION MÉMOIRE ---
+# --- 2. GESTION DE LA MÉMOIRE (SESSION STATE) ---
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 if 'audit_masse' not in st.session_state: st.session_state.audit_masse = None
 
-# --- 0. DIAGNOSTIC & CHARGEMENT ROBUSTE ---
+# --- 3. CHARGEMENT DES DONNÉES (EXTRÊMEMENT ROBUSTE) ---
 @st.cache_data
 def load_data():
-    # Fonction locale pour tenter de lire un fichier
     def smart_read(filename):
+        # A. Vérifier si le fichier existe physiquement
         if not os.path.exists(filename):
+            st.error(f"❌ FICHIER MANQUANT : '{filename}' n'est pas à la racine.")
+            st.info(f"Fichiers visibles ici : {os.listdir('.')}")
             return None
         
+        # B. Vérifier s'il n'est pas vide (problème Git LFS ou upload raté)
+        if os.path.getsize(filename) < 50:
+            st.error(f"⚠️ FICHIER VIDE ou CORROMPU : '{filename}' (Taille < 50 octets).")
+            return None
+
+        # C. Essayer de lire avec plusieurs séparateurs
         separators = [',', ';', '\t']
         for sep in separators:
             try:
                 df = pd.read_csv(filename, sep=sep, engine='python', on_bad_lines='skip')
-                # Nettoyage colonnes
-                df.columns = [c.lower().strip() for c in df.columns]
-                # Vérification basique
-                if len(df.columns) > 2:
+                # Si on a réussi à créer des colonnes, on nettoie les noms
+                if len(df.columns) > 1:
+                    df.columns = [c.lower().strip() for c in df.columns]
                     return df
             except:
                 continue
+        
+        st.error(f"⛔ FICHIER ILLISIBLE : Impossible de lire '{filename}' (Format inconnu).")
         return None
 
-    # 1. Chargement Actuel
+    # --- Chargement Actuel ---
     df_now = smart_read("risk_actuel.csv")
-    if df_now is not None and 'score' in df_now.columns:
-        df_now['score'] = df_now['score'].astype(str).str.replace(',', '.', regex=False)
-        df_now['score'] = pd.to_numeric(df_now['score'], errors='coerce')
-        # Filtre WRI (optionnel selon structure)
+    if df_now is not None:
+        # Conversion du score (4,5 -> 4.5)
+        if 'score' in df_now.columns:
+            df_now['score'] = df_now['score'].astype(str).str.replace(',', '.', regex=False)
+            df_now['score'] = pd.to_numeric(df_now['score'], errors='coerce')
+        # Filtre spécifique WRI (si les colonnes existent)
         if 'indicator_name' in df_now.columns:
             df_now = df_now[df_now['indicator_name'] == 'bws']
 
-    # 2. Chargement Futur
+    # --- Chargement Futur ---
     df_fut = smart_read("risk_futur.csv")
-    if df_fut is not None and 'score' in df_fut.columns:
-        df_fut['score'] = df_fut['score'].astype(str).str.replace(',', '.', regex=False)
-        df_fut['score'] = pd.to_numeric(df_fut['score'], errors='coerce')
-        if 'year' in df_fut.columns:
+    if df_fut is not None:
+        if 'score' in df_fut.columns:
+            df_fut['score'] = df_fut['score'].astype(str).str.replace(',', '.', regex=False)
+            df_fut['score'] = pd.to_numeric(df_fut['score'], errors='coerce')
+        if 'year' in df_fut.columns and 'scenario' in df_fut.columns:
             mask = (df_fut['year'] == 2030) & (df_fut['scenario'] == 'bau') & (df_fut['indicator_name'] == 'bws')
             df_fut = df_fut[mask]
 
     return df_now, df_fut
 
-# Lancement du chargement
+# Exécution du chargement avec arrêt propre si échec
 try:
     df_actuel, df_futur = load_data()
 except Exception as e:
-    st.error(f"Erreur technique au chargement : {e}")
-    df_actuel, df_futur = None, None
+    st.error(f"Erreur Système : {e}")
+    st.stop()
 
-# --- BLOC DE DÉBOGAGE VISUEL (ANTI-CRASH) ---
 if df_actuel is None or df_futur is None:
-    st.error("🚨 ERREUR CRITIQUE : Fichiers de données introuvables.")
-    
-    st.warning("Voici ce que je vois dans le dossier du serveur :")
-    files_present = os.listdir('.')
-    st.code(f"Fichiers trouvés : {files_present}")
-    
-    st.markdown("""
-    **Solutions :**
-    1. Vérifiez que `risk_actuel.csv` et `risk_futur.csv` sont bien à la racine du GitHub.
-    2. S'ils sont dans un dossier, déplacez-les ou changez le chemin dans le code.
-    3. Vérifiez l'orthographe exacte (majuscules/minuscules).
-    """)
-    st.stop() # Arrête l'app ici proprement au lieu de crasher
+    st.warning("⚠️ L'application ne peut pas démarrer sans les fichiers CSV valides.")
+    st.stop()
 
-# --- 1. FONCTIONS GÉOGRAPHIQUES ---
+# --- 4. FONCTIONS GÉOGRAPHIQUES (ANTI-BLOCAGE) ---
 def get_location_safe(ville, pays):
-    agents = ["AquaBot_Pro_v4", "Geo_Student_Project", "Climate_Risk_Tool"]
+    agents = ["Aqua_V4", "Student_Project_Fr", "Data_Viz_Tool"]
     for i in range(3):
         try:
-            ua = f"{agents[i%3]}_{randint(1000,9999)}"
-            geolocator = Nominatim(user_agent=ua, timeout=10)
-            return geolocator.geocode(f"{ville}, {pays}")
+            ua = f"{agents[i]}_{randint(100,999)}"
+            geolocator = Nominatim(user_agent=ua, timeout=5)
+            loc = geolocator.geocode(f"{ville}, {pays}")
+            if loc: return loc
         except:
             time.sleep(1)
     return None
 
 def get_region_safe(lat, lon):
     try:
-        ua = f"Reg_Finder_{randint(1000,9999)}"
-        geolocator = Nominatim(user_agent=ua, timeout=10)
+        ua = f"Rev_Geo_{randint(100,999)}"
+        geolocator = Nominatim(user_agent=ua, timeout=5)
         return geolocator.reverse(f"{lat}, {lon}", language='en')
-    except:
-        return None
+    except: return None
 
-# --- 2. MOTEUR RSS (NEWS) ---
+# --- 5. MOTEUR NEWS (GOOGLE RSS) ---
 def get_company_news(company_name):
-    # Encodage propre de l'URL
     query = urllib.parse.quote(f"{company_name} water environment")
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
     
     def clean_html(raw_html):
-        # Enlève les balises HTML
         cleanr = re.compile('<.*?>')
-        cleantext = re.sub(cleanr, '', raw_html)
-        return cleantext.replace("&nbsp;", " ").replace("&#39;", "'").replace("&quot;", '"')
+        text = re.sub(cleanr, '', raw_html)
+        return text.replace("&nbsp;", " ").replace("&#39;", "'")
     
     try:
         feed = feedparser.parse(rss_url)
-        news_items = []
-        for entry in feed.entries[:5]: # Top 5 news
-            raw_summary = entry.summary if 'summary' in entry else entry.title
-            clean_summary = clean_html(raw_summary)
-            # Tronquer si trop long
-            if len(clean_summary) > 200: clean_summary = clean_summary[:200] + "..."
+        items = []
+        for entry in feed.entries[:5]:
+            summary = entry.summary if 'summary' in entry else entry.title
+            clean_sum = clean_html(summary)
+            if len(clean_sum) > 200: clean_sum = clean_sum[:200] + "..."
             
-            news_items.append({
+            items.append({
                 "title": entry.title,
                 "link": entry.link,
-                "published": entry.published,
-                "summary": clean_summary
+                "summary": clean_sum
             })
-        return news_items
+        return items
     except:
         return []
 
-# --- 3. MOTEUR ANALYSE ---
+# --- 6. MOTEUR ANALYSE ---
 def analyser_site(ville, pays, region_forcee=None):
     loc = get_location_safe(ville, pays)
     if not loc: return None
     
-    # Détection région
+    # Région
     loc_details = get_region_safe(loc.latitude, loc.longitude)
     reg_auto = ""
     if loc_details:
         addr = loc_details.raw['address']
         reg_auto = addr.get('state', addr.get('region', addr.get('county', ''))).strip()
     
-    region_finale = region_forcee if region_forcee else reg_auto
+    region_final = region_forcee if region_forcee else reg_auto
     
-    # Recherche Data
+    # Matching Data
+    # On vérifie que les colonnes existent pour éviter le crash
+    if 'name_0' not in df_actuel.columns or 'name_1' not in df_actuel.columns:
+        return {"ent": "Error", "ville": ville, "lat": loc.latitude, "lon": loc.longitude, "s25": 0, "s30": 0, "found": False, "error": "Colonnes CSV incorrectes"}
+
     mask_pays = df_actuel['name_0'].astype(str).str.lower().str.contains(pays.lower().strip(), na=False)
     df_pays = df_actuel[mask_pays]
-    match_now = df_pays[df_pays['name_1'].astype(str).str.lower().str.contains(region_finale.lower().strip(), na=False)]
+    match_now = df_pays[df_pays['name_1'].astype(str).str.lower().str.contains(region_final.lower().strip(), na=False)]
     
-    mask_pays_fut = df_futur['name_0'].astype(str).str.lower().str.contains(pays.lower().strip(), na=False)
-    df_pays_fut = df_futur[mask_pays_fut]
-    match_fut = df_pays_fut[df_pays_fut['name_1'].astype(str).str.lower().str.contains(region_finale.lower().strip(), na=False)]
+    mask_pays_f = df_futur['name_0'].astype(str).str.lower().str.contains(pays.lower().strip(), na=False)
+    df_f_pays = df_futur[mask_pays_f]
+    match_fut = df_f_pays[df_f_pays['name_1'].astype(str).str.lower().str.contains(region_final.lower().strip(), na=False)]
 
+    s25 = match_now['score'].mean() if not match_now.empty else 0
+    s30 = match_fut['score'].mean() if not match_fut.empty else 0
+    
     return {
-        "ent": "N/A", "ville": ville, "pays": pays, "region": region_finale,
+        "ent": "N/A", "ville": ville, "pays": pays, "region": region_final,
         "lat": loc.latitude, "lon": loc.longitude,
-        "s25": match_now['score'].mean() if not match_now.empty else 0,
-        "s30": match_fut['score'].mean() if not match_fut.empty else 0,
-        "found": not match_now.empty
+        "s25": s25, "s30": s30, "found": not match_now.empty
     }
 
-# --- 4. GÉNÉRATEUR PDF ---
-def create_pdf(data_dict, analysis_text):
-    def clean(t):
-        t = str(t).replace("✅", "[OK]").replace("⚠️", "[WARN]").replace("🚨", "[ALERT]").replace("ℹ️", "[INFO]")
-        t = t.replace("’", "'").replace("“", '"').replace("”", '"').replace("–", "-").replace("…", "...")
-        return t.encode('latin-1', 'replace').decode('latin-1')
+# --- 7. GÉNÉRATEUR PDF (SANS CRASH) ---
+def create_pdf(data):
+    def clean(text):
+        if not isinstance(text, str): text = str(text)
+        # Remplacements de sûreté
+        replacements = {"✅": "[OK]", "⚠️": "[!]", "🚨": "[ALERTE]", "ℹ️": "[INFO]", "’": "'", "“": '"', "”": '"', "…": "..."}
+        for k, v in replacements.items():
+            text = text.replace(k, v)
+        # Encodage final pour FPDF
+        return text.encode('latin-1', 'replace').decode('latin-1')
 
     pdf = FPDF()
     pdf.add_page()
     
-    # Header
+    # Titre
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, clean(f"RAPPORT AQUARISK: {data_dict['ent'].upper()}"), ln=1, align='C')
+    pdf.cell(0, 10, clean(f"RAPPORT AQUARISK: {data['ent'].upper()}"), ln=1, align='C')
     pdf.ln(10)
     
-    # Data
+    # Infos
     pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, clean(f"Loc: {data_dict['loc']}"), ln=1)
-    pdf.cell(0, 10, f"VaR (Capital a Risque): {data_dict['var']:,.0f} $", ln=1)
+    pdf.cell(0, 10, clean(f"Localisation: {data['loc']}"), ln=1)
+    pdf.cell(0, 10, clean(f"VaR (Risque Financier): {data['var']:,.0f} $"), ln=1)
     pdf.ln(5)
     
     # Scores
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, f"Risque Residuel 2025: {data_dict['s25_display']:.2f} / 5", ln=1)
-    pdf.cell(0, 10, f"Risque Physique (Base): {data_dict['s25_brut']:.2f} / 5", ln=1)
-    pdf.cell(0, 10, f"Projection 2030: {data_dict['s30_display']:.2f} / 5", ln=1)
+    pdf.cell(0, 10, f"Risque Residuel 2025: {data['s25_display']:.2f} / 5", ln=1)
+    pdf.cell(0, 10, f"Risque Physique (Base): {data['s25_brut']:.2f} / 5", ln=1)
+    pdf.cell(0, 10, f"Projection 2030: {data['s30_display']:.2f} / 5", ln=1)
     pdf.ln(5)
     
-    # IA Text
+    # Analyse
     pdf.set_font("Arial", 'I', 10)
-    pdf.multi_cell(0, 8, clean(f"Analyse Stratégique:\n{analysis_text}"))
+    pdf.multi_cell(0, 8, clean(f"Analyse IA:\n{data['txt_ia']}"))
     
-    # News Section
-    if 'news' in data_dict and data_dict['news']:
+    # News
+    if 'news' in data and data['news']:
         pdf.ln(10)
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 10, "Revue de Presse (Dernieres 24h):", ln=1)
-        
-        for n in data_dict['news']:
-            pdf.set_font("Arial", 'B', 10)
-            pdf.cell(0, 6, clean(f"- {n['title'][:80]}..."), ln=1)
-            
+        pdf.set_font("Arial", 'B', 11)
+        pdf.cell(0, 10, "Presse (Google News):", ln=1)
+        for n in data['news']:
+            pdf.set_font("Arial", 'B', 9)
+            pdf.cell(0, 6, clean(f"- {n['title'][:90]}"), ln=1)
             pdf.set_font("Arial", 'I', 8)
-            pdf.set_text_color(100, 100, 100)
-            clean_sum = clean(n['summary'])
-            pdf.multi_cell(0, 5, f"   {clean_sum}")
-            pdf.set_text_color(0, 0, 0)
-            pdf.ln(2)
+            pdf.set_text_color(100,100,100)
+            pdf.multi_cell(0, 4, clean(f"  {n['summary']}"))
+            pdf.set_text_color(0,0,0)
+            pdf.ln(1)
 
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
-# --- 5. INTERFACE UI ---
-tab1, tab2 = st.tabs(["🔍 Audit Live (RSS)", "📂 Import Excel (Masse)"])
+# --- 8. INTERFACE UTILISATEUR ---
+tab1, tab2 = st.tabs(["📡 Audit Live", "📂 Excel Masse"])
 
-# === ONGLET 1 ===
 with tab1:
     c1, c2 = st.columns([1, 2])
     with c1:
-        st.subheader("📡 Paramètres Cible")
-        ent = st.text_input("Entreprise", "Tesla")
+        st.info("💡 Paramètres de l'usine à auditer")
+        ent = st.text_input("Nom Entreprise", "Tesla")
         v = st.text_input("Ville", "Austin")
         p = st.text_input("Pays", "United States")
         reg = st.text_input("Région (Optionnel)", "Texas")
-        cap = st.number_input("Capital Exposé ($)", 10000000)
+        cap = st.number_input("Capital ($)", 10000000)
         
-        st.markdown("---")
-        notes = st.text_area("Notes manuelles (Optionnel)", height=50)
+        st.write("---")
+        notes = st.text_area("Notes manuelles", height=60, placeholder="Ex: Plan de réduction...")
         
-        if st.button("🚀 Lancer l'Audit"):
-            with st.spinner("🛰️ Scan Satellite + 📰 Analyse Presse..."):
+        if st.button("🚀 LANCER L'AUDIT"):
+            with st.spinner("Analyse en cours (Satellite + News)..."):
                 res = analyser_site(v, p, reg)
                 
                 if res and res['found']:
                     # 1. News
                     news = get_company_news(ent)
                     
-                    # 2. IA Scoring
-                    full_text = notes + " " + " ".join([n['title'] + " " + n['summary'] for n in news])
-                    
-                    m_pos = ['recycle', 'reduce', 'saving', 'efficient', 'reuse', 'rainwater', 'replenish']
-                    m_neg = ['drought', 'shortage', 'conflict', 'pollution', 'fine', 'violation', 'leak']
-                    
+                    # 2. Scoring IA
+                    txt_combined = notes + " " + " ".join([n['title'] for n in news])
                     bonus = 0.0
-                    txt_ia = "Aucune donnée textuelle pertinente."
+                    txt_ia = "Neutre (Pas de signal fort)."
                     
-                    if len(full_text) > 10:
-                        s_pos = sum(1 for w in m_pos if w in full_text.lower())
-                        s_neg = sum(1 for w in m_neg if w in full_text.lower())
-                        
-                        if s_pos > s_neg:
+                    m_pos = ['recycle', 'reduce', 'saving', 'stewardship', 'rainwater']
+                    m_neg = ['drought', 'shortage', 'conflict', 'pollution', 'violation']
+                    
+                    if len(txt_combined) > 5:
+                        s_pos = sum(1 for w in m_pos if w in txt_combined.lower())
+                        s_neg = sum(1 for w in m_neg if w in txt_combined.lower())
+                        if s_pos > s_neg: 
                             bonus = 0.15
-                            txt_ia = f"✅ Positif : Stratégie détectée ({s_pos} indices positifs)."
-                        elif s_neg > s_pos:
+                            txt_ia = f"✅ Positif (-15% Risque): {s_pos} indices positifs trouvés."
+                        elif s_neg > s_pos: 
                             bonus = -0.10
-                            txt_ia = f"⚠️ Alerte : Presse/Notes négatives ({s_neg} indices négatifs)."
-                        else:
-                            txt_ia = "ℹ️ Neutre : Pas de signal fort détecté."
-
-                    # 3. Calculs
+                            txt_ia = f"⚠️ Alerte (+10% Risque): {s_neg} indices négatifs trouvés."
+                    
+                    # 3. Finalisation
                     res['ent'] = ent
                     res['s25_brut'] = res['s25']
                     res['s25_display'] = res['s25'] * (1 - bonus)
@@ -273,32 +270,32 @@ with tab1:
                     res['var'] = cap * (res['s25_display'] / 5)
                     res['txt_ia'] = txt_ia
                     res['news'] = news
+                    res['loc'] = f"{res['ville']}, {res['region']}, {res['pays']}"
                     
                     st.session_state.audit_unique = res
                     st.rerun()
                 else:
-                    st.error("❌ Lieu introuvable ou hors couverture WRI.")
+                    st.error("❌ Lieu introuvable ou hors base de données.")
 
     with c2:
         if st.session_state.audit_unique:
             r = st.session_state.audit_unique
+            st.success(f"Rapport : {r['ent']}")
             
-            st.success(f"Résultats : {r['ent']}")
-            
+            # KPIs
             k1, k2, k3 = st.columns(3)
             k1.metric("Risque Résiduel", f"{r['s25_display']:.2f}/5", delta=f"Base: {r['s25_brut']:.2f}", delta_color="inverse")
             k2.metric("Horizon 2030", f"{r['s30_display']:.2f}/5")
             k3.metric("VaR Financière", f"{r['var']:,.0f} $")
             
-            with st.expander("📰 Revue de Presse Automatique", expanded=True):
-                st.info(f"🤖 **IA :** {r['txt_ia']}")
+            # Onglet News
+            with st.expander("📰 Revue de Presse", expanded=True):
+                st.caption(r['txt_ia'])
                 if r['news']:
                     for n in r['news']:
-                        st.markdown(f"**[{n['title']}]({n['link']})**")
-                        st.caption(f"{n['summary']}")
-                        st.divider()
+                        st.markdown(f"- [{n['title']}]({n['link']})")
                 else:
-                    st.write("Aucune news trouvée.")
+                    st.write("Aucune news récente.")
 
             # Carte
             m = folium.Map([r['lat'], r['lon']], zoom_start=9, tiles="cartodbpositron")
@@ -306,55 +303,39 @@ with tab1:
             st_folium(m, height=300)
             
             # PDF
-            pdf_d = {
-                'ent': r['ent'], 'loc': f"{r['ville']}, {r['region']}", 'var': r['var'],
-                's25_display': r['s25_display'], 's25_brut': r['s25_brut'],
-                's30_display': r['s30_display'], 'news': r['news']
-            }
-            pdf_b = create_pdf(pdf_d, r['txt_ia'])
-            st.download_button("📄 Télécharger Rapport PDF", pdf_b, file_name=f"Rapport_{r['ent']}.pdf", mime="application/pdf")
+            pdf_bytes = create_pdf(r)
+            st.download_button("📄 Télécharger PDF", pdf_bytes, file_name=f"Rapport_{r['ent']}.pdf", mime="application/pdf")
 
-# === ONGLET 2 ===
 with tab2:
-    st.header("Analyse Excel (Portefeuille)")
+    st.header("Mode Excel (Portefeuille)")
     
-    df_modele = pd.DataFrame({"Ville": ["Lyon", "Berlin"], "Pays": ["France", "Germany"], "Region_Force": ["", ""]})
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        df_modele.to_excel(writer, index=False)
-    st.download_button("📥 Modèle Excel", data=buffer.getvalue(), file_name="modele.xlsx", mime="application/vnd.ms-excel")
+    df_ex = pd.DataFrame({"Ville": ["Lyon", "Berlin"], "Pays": ["France", "Germany"], "Region_Force": ["", ""]})
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+        df_ex.to_excel(writer, index=False)
+    st.download_button("📥 Modèle Excel", buf.getvalue(), "modele.xlsx", "application/vnd.ms-excel")
     
     up = st.file_uploader("Upload Excel", type=["xlsx", "csv"])
-    
     if up and st.button("Lancer Scan"):
         df_in = pd.read_excel(up) if up.name.endswith('xlsx') else pd.read_csv(up)
-        results = []
+        out = []
         bar = st.progress(0)
         
         for i, row in df_in.iterrows():
             rf = row['Region_Force'] if 'Region_Force' in row and pd.notna(row['Region_Force']) else None
             res = analyser_site(row['Ville'], row['Pays'], rf)
             
-            if res and res['found']:
-                results.append({
-                    "Ville": row['Ville'], "Pays": row['Pays'], "Region": res['region'],
-                    "Score_2025": res['s25'], "Score_2030": res['s30']
-                })
+            if res and res.get('found'):
+                out.append({"Ville": row['Ville'], "Score_25": res['s25'], "Score_30": res['s30']})
             else:
-                results.append({"Ville": row['Ville'], "Score_2025": "Erreur GPS/Data"})
+                out.append({"Ville": row['Ville'], "Score_25": "Erreur"})
             
             bar.progress((i+1)/len(df_in))
             time.sleep(1)
             
-        st.session_state.audit_masse = pd.DataFrame(results)
-        st.success("Scan Terminé !")
-
-    if st.session_state.audit_masse is not None:
-        df_fin = st.session_state.audit_masse
-        st.dataframe(df_fin)
+        st.session_state.audit_masse = pd.DataFrame(out)
+        st.success("Terminé !")
         
-        b_out = io.BytesIO()
-        with pd.ExcelWriter(b_out, engine='xlsxwriter') as writer:
-            df_fin.to_excel(writer, index=False)
-        st.download_button("📥 Résultats Excel", b_out, file_name="Resultats.xlsx", mime="application/vnd.ms-excel")
+    if st.session_state.audit_masse is not None:
+        st.dataframe(st.session_state.audit_masse)
         
