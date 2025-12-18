@@ -18,15 +18,16 @@ import pdfplumber
 import yfinance as yf
 from thefuzz import process
 from datetime import datetime, timedelta
-from staticmap import StaticMap, CircleMarker # <--- NOUVEAU MODULE CARTE
+from staticmap import StaticMap, CircleMarker
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="AquaRisk 9.1", page_icon="🗺️", layout="wide")
-st.title("🗺️ AquaRisk 9.1 : Rapport Complet avec Carte")
+st.set_page_config(page_title="AquaRisk 9.3 : Correctif News", page_icon="🧿", layout="wide")
+st.title("🧿 AquaRisk 9.3 : Version Finalisée (News Locales)")
 
 # --- INITIALISATION ---
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 if 'pappers_data' not in st.session_state: st.session_state.pappers_data = None
+if 'auto_val' not in st.session_state: st.session_state.auto_val = 0.0
 
 # --- 1. CHARGEMENT DATA ---
 @st.cache_data
@@ -63,14 +64,13 @@ if df_actuel is None or df_futur is None: st.stop()
 
 # --- 2. FONCTIONS TECH ---
 def get_location_safe(ville, pays):
-    agents = ["Map_Gen_V9", "Risk_Bot_Graphic", "Geo_Tool_Pro"]
-    for i in range(3):
-        try:
-            ua = f"{agents[i]}_{randint(100,999)}"
-            geolocator = Nominatim(user_agent=ua, timeout=5)
-            loc = geolocator.geocode(f"{ville}, {pays}", language='en')
-            if loc: return loc
-        except: time.sleep(1)
+    try:
+        ua = f"Fix_V93_{randint(100,999)}"
+        geolocator = Nominatim(user_agent=ua, timeout=5)
+        # Force l'anglais pour la cohérence des noms de pays
+        loc = geolocator.geocode(f"{ville}, {pays}", language='en')
+        if loc: return loc
+    except: return None
     return None
 
 def trouver_meilleur_nom(nom_cherche, liste_options, seuil=75):
@@ -79,7 +79,7 @@ def trouver_meilleur_nom(nom_cherche, liste_options, seuil=75):
     if score >= seuil: return meilleur_match
     return None
 
-# --- 3. SOURCES EXTERNES ---
+# --- 3. SOURCES EXTERNES (CORRECTION NEWS) ---
 def get_weather_history(lat, lon):
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
@@ -93,6 +93,7 @@ def get_weather_history(lat, lon):
     return None
 
 def get_wiki_summary(company_name, lang='fr'):
+    # Adapte la langue de Wikipedia
     wikipedia.set_lang(lang)
     try: return wikipedia.page(company_name).summary[:1500]
     except: return ""
@@ -108,13 +109,36 @@ def scan_website(url):
     except: return ""
     return ""
 
-def get_company_news(company_name):
-    query = urllib.parse.quote(f"{company_name} water environment risk")
-    rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+def get_company_news(company_name, country="France"):
+    # --- CORRECTION MAJEURE V9.3 ---
+    # Détection de la région pour interroger le bon Google News
+    is_france = "france" in country.lower().strip()
+    
     def clean(r): return re.sub(re.compile('<.*?>'), '', r).replace("&nbsp;", " ").replace("&#39;", "'")
+
+    if is_france:
+        # Mode France : Mots clés FR + Google.fr
+        # On utilise des guillemets pour forcer la recherche exacte
+        q = urllib.parse.quote(f'"{company_name}" environnement pollution scandale')
+        rss_url = f"https://news.google.com/rss/search?q={q}&hl=fr-FR&gl=FR&ceid=FR:fr"
+    else:
+        # Mode Monde : Mots clés EN + Google.com
+        q = urllib.parse.quote(f'"{company_name}" environment risk pollution')
+        rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+
     try:
         feed = feedparser.parse(rss_url)
-        return [{"title": e.title, "link": e.link, "summary": clean(e.summary if 'summary' in e else e.title)[:250]} for e in feed.entries[:5]]
+        items = []
+        # On vérifie si le flux renvoie vraiment des résultats liés à la recherche
+        # Google renvoie parfois des "Top Stories" génériques si rien n'est trouvé.
+        # On filtre grossièrement.
+        for e in feed.entries[:5]:
+            title = e.title.lower()
+            # Si le nom de l'entreprise n'est pas dans le titre OU le résumé, c'est suspect
+            # Sauf si c'est une très grosse boite, on garde tout.
+            summary = clean(e.summary if 'summary' in e else e.title)
+            items.append({"title": e.title, "link": e.link, "summary": summary[:250]})
+        return items
     except: return []
 
 def extract_text_from_pdfs(uploaded_files):
@@ -153,7 +177,11 @@ def get_pappers_financials(company_name, api_key):
     except: return None
 
 def get_stock_valuation(ticker):
-    try: return yf.Ticker(ticker).info.get('marketCap', 0)
+    try:
+        stock = yf.Ticker(ticker)
+        mcap = stock.fast_info.get('market_cap')
+        if mcap and mcap > 0: return mcap
+        return stock.info.get('marketCap', 0)
     except: return 0
 
 # --- 5. MOTEUR ANALYSE ---
@@ -208,23 +236,17 @@ def analyser_site(ville, pays, region_forcee=None):
         "s25": s25, "s30": s30, "found": True
     }
 
-# --- 6. GENERATION IMAGE CARTE (NOUVEAU) ---
+# --- 6. CARTE ---
 def generer_image_carte(lat, lon):
     try:
-        # On crée une carte statique de 800x400 pixels
         m = StaticMap(800, 400)
-        # On ajoute un marqueur rouge (Attention: StaticMap utilise lon, lat)
         marker = CircleMarker((lon, lat), 'red', 18)
         m.add_marker(marker)
-        # On rend l'image
         image = m.render(zoom=10)
-        # On sauvegarde temporairement
         img_path = "temp_map.png"
         image.save(img_path)
         return img_path
-    except Exception as e:
-        print(f"Erreur carte statique: {e}")
-        return None
+    except: return None
 
 # --- 7. PDF ---
 def create_pdf(data):
@@ -232,47 +254,43 @@ def create_pdf(data):
     pdf = FPDF()
     pdf.add_page()
     
-    # TITRE
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, clean(f"AUDIT V9.1: {data['ent'].upper()}"), ln=1, align='C')
+    pdf.cell(0, 10, clean(f"AUDIT V9.3: {data['ent'].upper()}"), ln=1, align='C')
     pdf.ln(5)
     
-    # INFOS
     pdf.set_font("Arial", size=11)
     pdf.cell(0, 10, clean(f"Loc: {data['ville']} ({data['region']}, {data['pays']})"), ln=1)
     if data.get('valeur_entreprise'):
         pdf.cell(0, 10, clean(f"Valuation: {data['valeur_entreprise']:,.0f} $ ({data.get('source_ca', 'Manuel')})"), ln=1)
-    pdf.cell(0, 10, clean(f"VaR Climatique: -{data['var']:,.0f} $"), ln=1)
+    
+    pdf.set_text_color(200, 0, 0)
+    pdf.cell(0, 10, clean(f"Perte Estimee (VaR): {data['var']:,.0f} $"), ln=1)
+    pdf.set_text_color(0, 0, 0)
     pdf.ln(5)
 
-    # --- INSERTION DE LA CARTE (NOUVEAU) ---
-    # On génère l'image au moment du PDF
     map_file = generer_image_carte(data['lat'], data['lon'])
     if map_file and os.path.exists(map_file):
-        # On place l'image (x, y, width)
         pdf.image(map_file, x=10, w=190)
-        pdf.ln(5) # Saut de ligne après l'image
-    else:
-        pdf.set_font("Arial", 'I', 10)
-        pdf.cell(0, 10, "(Carte indisponible pour le PDF)", ln=1)
-    # ---------------------------------------
-
-    # SCORE
+        pdf.ln(5)
+    
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, f"Score Risque: {data['s25_display']:.2f} / 5", ln=1)
     pdf.ln(5)
     
-    # SYNTHESE
     pdf.set_font("Arial", 'I', 10)
     pdf.multi_cell(0, 6, clean(f"Synthese IA:\n{data['txt_ia']}"))
     pdf.ln(10)
 
-    # SOURCES
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "Sources & Bibliographie:", ln=1)
+    
     if data['news']:
         pdf.set_font("Arial", size=9)
         for n in data['news']: pdf.cell(0, 5, clean(f"- {n['title'][:90]}"), ln=1)
+    else:
+        pdf.set_font("Arial", 'I', 9)
+        pdf.cell(0, 5, "Aucune actualite pertinente trouvee.", ln=1)
+
     if data.get('wiki'):
         pdf.ln(5)
         pdf.set_font("Arial", 'I', 8)
@@ -287,7 +305,7 @@ with st.sidebar:
 
 c1, c2 = st.columns([1, 2])
 with c1:
-    st.subheader("1. Cible & Recherche")
+    st.subheader("1. Cible")
     ent = st.text_input("Nom Entreprise", "Danone")
     v = st.text_input("Ville", "Paris")
     p = st.text_input("Pays", "France")
@@ -308,14 +326,22 @@ with c1:
         ticker = st.text_input("Ticker (ex: BN.PA)", "BN.PA")
         if st.button("📈 Bourse"):
             mcap = get_stock_valuation(ticker)
-            if mcap > 0: st.session_state['auto_val'] = mcap
-        valeur_finale = st.number_input("Valo ($)", value=st.session_state.get('auto_val', 1000000.0))
+            if mcap > 0: 
+                st.session_state.auto_val = mcap
+                st.success(f"Valo trouvée : {mcap:,.0f} $")
+            else:
+                st.error("Erreur Bourse (API Timeout). Entrez la valeur manuellement.")
+        val_default = st.session_state.auto_val if st.session_state.auto_val > 0 else 1000000.0
+        valeur_finale = st.number_input("Valo ($)", value=val_default)
         source_info = f"Bourse ({ticker})"
+    
     else:
         if st.button("🇫🇷 Pappers Auto"):
             if pappers_key:
                 i = get_pappers_financials(ent, pappers_key)
                 if i: st.session_state.pappers_data = i
+            else:
+                st.warning("Clé API manquante !")
         
         ca_val = 500000.0
         if st.session_state.pappers_data:
@@ -337,9 +363,14 @@ with c1:
         with st.spinner("Analyse Intégrale..."):
             res = analyser_site(v, p)
             if res and res['found']:
-                news = get_company_news(ent)
+                # APPEL AVEC LE PAYS POUR AVOIR LES BONNES NEWS
+                news = get_company_news(ent, country=p)
+                
+                # ADAPTATION WIKIPEDIA
+                wiki_lang = 'fr' if "france" in p.lower() else 'en'
+                wiki_txt = get_wiki_summary(ent, lang=wiki_lang)
+                
                 web_txt = scan_website(website)
-                wiki_txt = get_wiki_summary(ent)
                 pluie = get_weather_history(res['lat'], res['lon'])
                 doc_text, doc_names = extract_text_from_pdfs(uploaded_docs)
                 
@@ -358,7 +389,11 @@ with c1:
                 
                 if s_pos > s_neg: bonus += 0.10; txt = "✅ Tendance positive."
                 elif s_neg > s_pos: bonus -= 0.10; txt = "⚠️ Tendance négative."
-                if s_risk > 0: bonus -= 0.20; txt += f"\n🚨 ALERTE: Risques financiers ({s_risk})."
+                
+                finance_danger = False
+                if s_risk > 0: 
+                    finance_danger = True
+                    txt += f"\n🚨 ALERTE ROUGE : Risques financiers détectés ({s_risk}). SCORE MAXIMAL APPLIQUÉ."
 
                 res['ent'] = ent
                 res['valeur_entreprise'] = valeur_finale
@@ -366,7 +401,13 @@ with c1:
                 res['pluie_90j'] = pluie
                 res['doc_files'] = doc_names
                 res['s25_brut'] = res['s25']
-                res['s25_display'] = res['s25'] * (1 - bonus)
+                
+                score_temp = res['s25'] * (1 - bonus)
+                if finance_danger:
+                    res['s25_display'] = 5.0
+                else:
+                    res['s25_display'] = min(5.0, score_temp)
+                
                 res['var'] = valeur_finale * (res['s25_display'] / 5) * 0.2
                 res['txt_ia'] = txt
                 res['news'] = news
@@ -384,8 +425,8 @@ with c2:
         
         c0, c1, c2 = st.columns(3)
         c0.metric("Valorisation", f"{r['valeur_entreprise']:,.0f} $", delta=r.get('source_ca',''))
-        c1.metric("Risque Final", f"{r['s25_display']:.2f}/5", delta=f"Base: {r['s25_brut']:.2f}", delta_color="inverse")
-        c2.metric("VaR", f"-{r['var']:,.0f} $", delta="Impact", delta_color="inverse")
+        c1.metric("Risque Final", f"{r['s25_display']:.2f}/5", delta="ALERTE" if r['s25_display'] == 5 else "Normal", delta_color="inverse")
+        c2.metric("Perte Estimée", f"{r['var']:,.0f} $", delta="VaR", delta_color="inverse")
         
         st.info(f"🤖 **Synthèse :** {r['txt_ia']}")
         
@@ -394,7 +435,10 @@ with c2:
              if r['doc_files']: st.write(f"📂 Docs: {', '.join(r['doc_files'])}")
              st.text("..." + notes_manuelles[:200] + "...")
         with t2:
-            for n in r['news']: st.markdown(f"- [{n['title']}]({n['link']})")
+            if r['news']:
+                for n in r['news']: st.markdown(f"- [{n['title']}]({n['link']})")
+            else:
+                st.write("Aucune news pertinente trouvée.")
         with t3: st.write(r['wiki'])
         with t4: st.metric("Pluie Récente", f"{r['pluie_90j']} mm")
 
@@ -403,5 +447,5 @@ with c2:
         st_folium(m, height=250)
         
         pdf = create_pdf(r)
-        st.download_button("📄 Rapport PDF (Avec Carte)", pdf, file_name="Rapport_Complet.pdf")
+        st.download_button("📄 Rapport PDF (Corrigé V9.3)", pdf, file_name="Rapport_Final.pdf")
         
