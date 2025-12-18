@@ -7,3 +7,5 @@ fpdf
 xlsxwriter
 feedparser
 openpyxl
+beautifulsoup4
+requests
