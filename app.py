@@ -21,8 +21,8 @@ from datetime import datetime, timedelta
 from staticmap import StaticMap, CircleMarker
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="AquaRisk 9.4 : Filtre Strict", page_icon="🛡️", layout="wide")
-st.title("🛡️ AquaRisk 9.4 : Filtrage Pertinence & Environnement")
+st.set_page_config(page_title="AquaRisk 9.5 : Valo Réaliste", page_icon="⚖️", layout="wide")
+st.title("⚖️ AquaRisk 9.5 : Valorisation Financière Calibrée")
 
 # --- INITIALISATION ---
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
@@ -65,7 +65,7 @@ if df_actuel is None or df_futur is None: st.stop()
 # --- 2. FONCTIONS TECH ---
 def get_location_safe(ville, pays):
     try:
-        ua = f"Fix_V94_{randint(100,999)}"
+        ua = f"Fix_V95_{randint(100,999)}"
         geolocator = Nominatim(user_agent=ua, timeout=5)
         loc = geolocator.geocode(f"{ville}, {pays}", language='en')
         if loc: return loc
@@ -78,7 +78,7 @@ def trouver_meilleur_nom(nom_cherche, liste_options, seuil=75):
     if score >= seuil: return meilleur_match
     return None
 
-# --- 3. SOURCES EXTERNES (CORRECTION NEWS STRICTE) ---
+# --- 3. SOURCES EXTERNES ---
 def get_weather_history(lat, lon):
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
@@ -108,11 +108,9 @@ def scan_website(url):
     return ""
 
 def get_company_news(company_name, country="France"):
-    # --- FILTRE STRICT ANTI-HS ---
     is_france = "france" in country.lower().strip()
     def clean(r): return re.sub(re.compile('<.*?>'), '', r).replace("&nbsp;", " ").replace("&#39;", "'")
 
-    # Mots clés ciblés uniquement sur l'EAU et l'ENVIRONNEMENT pour éviter les sujets sociétaux (LGBT, Politique...)
     if is_france:
         q = urllib.parse.quote(f'"{company_name}" (eau OR pollution OR sécheresse OR environnement)')
         rss_url = f"https://news.google.com/rss/search?q={q}&hl=fr-FR&gl=FR&ceid=FR:fr"
@@ -123,9 +121,6 @@ def get_company_news(company_name, country="France"):
     try:
         feed = feedparser.parse(rss_url)
         items = []
-        
-        # On découpe le nom de l'entreprise pour vérifier la présence d'au moins un mot clé du nom
-        # Ex: Pour "Michel et Augustin", on veut trouver "Michel" et "Augustin" ou la phrase entière
         name_parts = company_name.lower().split()
         main_keyword = name_parts[0] if len(name_parts) > 0 else company_name.lower()
 
@@ -133,22 +128,9 @@ def get_company_news(company_name, country="France"):
             title = e.title.lower()
             summary = clean(e.summary if 'summary' in e else e.title).lower()
             full_content = title + " " + summary
-            
-            # FILTRE 1 : L'entreprise DOIT être citée
-            if main_keyword not in full_content:
-                continue # On saute cet article, c'est du bruit (ex: Danone)
-            
-            # FILTRE 2 : On évite les sujets sociétaux hors-sujet si possible
-            # (Optionnel, mais aide à nettoyer)
-            
-            items.append({
-                "title": e.title,
-                "link": e.link,
-                "summary": clean(e.summary if 'summary' in e else e.title)[:250]
-            })
-            
-            if len(items) >= 5: break # On s'arrête à 5 bons résultats
-            
+            if main_keyword not in full_content: continue
+            items.append({"title": e.title, "link": e.link, "summary": clean(e.summary if 'summary' in e else e.title)[:250]})
+            if len(items) >= 5: break
         return items
     except: return []
 
@@ -178,13 +160,15 @@ def get_pappers_financials(company_name, api_key):
         f_url = f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={siren}"
         f_data = requests.get(f_url, timeout=5).json()
         ca = 0
+        resultat_net = 0 # Nouveau
         annee = "N/A"
         for c in f_data.get('finances', []):
             if c.get('chiffre_affaires'):
                 ca = c['chiffre_affaires']
+                resultat_net = c.get('resultat', 0)
                 annee = c['annee_cloture_exercice']
                 break
-        return {"nom": match['nom_entreprise'], "ca": ca, "annee": annee}
+        return {"nom": match['nom_entreprise'], "ca": ca, "resultat": resultat_net, "annee": annee}
     except: return None
 
 def get_stock_valuation(ticker):
@@ -266,13 +250,15 @@ def create_pdf(data):
     pdf.add_page()
     
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, clean(f"AUDIT V9.4: {data['ent'].upper()}"), ln=1, align='C')
+    pdf.cell(0, 10, clean(f"AUDIT V9.5: {data['ent'].upper()}"), ln=1, align='C')
     pdf.ln(5)
     
     pdf.set_font("Arial", size=11)
     pdf.cell(0, 10, clean(f"Loc: {data['ville']} ({data['region']}, {data['pays']})"), ln=1)
     if data.get('valeur_entreprise'):
-        pdf.cell(0, 10, clean(f"Valuation: {data['valeur_entreprise']:,.0f} $ ({data.get('source_ca', 'Manuel')})"), ln=1)
+        # On affiche le secteur retenu si dispo
+        info_supp = f" ({data.get('source_ca', 'Manuel')})"
+        pdf.cell(0, 10, clean(f"Valuation Retenue: {data['valeur_entreprise']:,.0f} $ {info_supp}"), ln=1)
     
     pdf.set_text_color(200, 0, 0)
     pdf.cell(0, 10, clean(f"Perte Estimee (VaR): {data['var']:,.0f} $"), ln=1)
@@ -317,19 +303,19 @@ with st.sidebar:
 c1, c2 = st.columns([1, 2])
 with c1:
     st.subheader("1. Cible")
-    ent = st.text_input("Nom Entreprise", "Danone")
-    v = st.text_input("Ville", "Paris")
+    ent = st.text_input("Nom Entreprise", "Michel et Augustin")
+    v = st.text_input("Ville", "Boulogne-Billancourt")
     p = st.text_input("Pays", "France")
     website = st.text_input("Site Web", "")
     
     st.caption("🔍 **Chasseur de Rapports**")
     col_s1, col_s2 = st.columns(2)
-    with col_s1: st.markdown(f"[📄 PDF Google](https://www.google.com/search?q={urllib.parse.quote(ent + ' rapport durable filetype:pdf')})", unsafe_allow_html=True)
-    with col_s2: st.markdown(f"[📰 Scandales](https://www.google.com/search?q={urllib.parse.quote(ent + ' pollution amende')})", unsafe_allow_html=True)
+    with col_s1: st.markdown(f"[📄 PDF](https://www.google.com/search?q={urllib.parse.quote(ent + ' rapport durable filetype:pdf')})", unsafe_allow_html=True)
+    with col_s2: st.markdown(f"[📰 News](https://www.google.com/search?q={urllib.parse.quote(ent + ' pollution amende')})", unsafe_allow_html=True)
 
     st.markdown("---")
-    st.subheader("2. Finance")
-    mode_val = st.radio("Mode", ["Cotée", "Non Cotée"])
+    st.subheader("2. Finance & Valorisation")
+    mode_val = st.radio("Mode", ["Cotée", "Non Cotée (PME/ETI)"])
     valeur_finale = 0.0
     source_info = "Manuel"
     
@@ -339,15 +325,15 @@ with c1:
             mcap = get_stock_valuation(ticker)
             if mcap > 0: 
                 st.session_state.auto_val = mcap
-                st.success(f"Valo trouvée : {mcap:,.0f} $")
+                st.success(f"Valo : {mcap:,.0f} $")
             else:
-                st.error("Erreur Bourse. Valeur par défaut utilisée.")
-        
+                st.error("Erreur Bourse.")
         val_default = st.session_state.auto_val if st.session_state.auto_val > 0 else 1000000.0
         valeur_finale = st.number_input("Valo ($)", value=val_default)
         source_info = f"Bourse ({ticker})"
     
     else:
+        # LOGIQUE PAPPERS AMÉLIORÉE
         if st.button("🇫🇷 Pappers Auto"):
             if pappers_key:
                 i = get_pappers_financials(ent, pappers_key)
@@ -356,15 +342,44 @@ with c1:
                 st.warning("Clé API manquante !")
         
         ca_val = 500000.0
+        is_beneficiaire = True # Par défaut
+        
         if st.session_state.pappers_data:
             ca_val = float(st.session_state.pappers_data['ca'])
+            # Détection rentabilité simple
+            if st.session_state.pappers_data.get('resultat', 0) < 0:
+                is_beneficiaire = False
+            
             source_info = f"Pappers ({st.session_state.pappers_data['annee']})"
             st.success(f"CA: {ca_val:,.0f} €")
-            
-        ca = st.number_input("Chiffre d'Affaires", value=ca_val)
-        secteur = st.selectbox("Secteur", ["Industrie (0.8x)", "Tech (5.0x)", "Agri (1.0x)"])
-        coeffs = {"Industrie (0.8x)":0.8, "Tech (5.0x)":5.0, "Agri (1.0x)":1.0}
-        valeur_finale = st.number_input("Valo Retenue", value=ca * coeffs[secteur])
+            if not is_beneficiaire: st.warning("⚠️ Entreprise déficitaire détectée")
+
+        ca = st.number_input("Chiffre d'Affaires ($)", value=ca_val)
+        
+        # --- NOUVEAUX SECTEURS & MULTIPLES ---
+        secteur_label = st.selectbox("Secteur d'Activité", [
+            "Logiciel / SaaS (4.0x)", 
+            "Service Info / ESN (0.9x)",
+            "Industrie / Manuf. (0.5x)",
+            "Commerce / Retail (0.4x)",
+            "BTP / Construction (0.3x)",
+            "Agroalimentaire (0.7x)",
+            "Services aux Entr. (0.8x)"
+        ])
+        
+        # Extraction du chiffre entre parenthèses
+        coeff = float(re.search(r"([\d\.]+)x", secteur_label).group(1))
+        
+        # --- FACTEUR RENTABILITÉ ---
+        rentable = st.checkbox("L'entreprise est rentable (Bénéficiaire) ?", value=is_beneficiaire)
+        
+        val_brute = ca * coeff
+        if not rentable:
+            val_brute = val_brute * 0.7 # Décote de 30%
+            st.caption("📉 Décote de 30% appliquée (Non rentable)")
+        
+        st.info(f"Valo Estimée : {val_brute:,.0f} $")
+        valeur_finale = st.number_input("Valo Retenue", value=val_brute)
 
     st.markdown("---")
     st.write("📂 **3. Data Room**")
@@ -383,77 +398,4 @@ with c1:
                 doc_text, doc_names = extract_text_from_pdfs(uploaded_docs)
                 
                 corpus = f"{notes_manuelles} {web_txt} {wiki_txt} {doc_text} {' '.join([n['title'] for n in news])}"
-                m_pos = ['durable', 'recyclage', 'économie', 'biologique', 'iso 14001', 'b corp']
-                m_neg = ['pollution', 'plainte', 'fuite', 'non-conformité']
-                m_risk = ['provision', 'litige', 'amende', 'redressement', 'procès']
                 
-                s_pos = sum(1 for w in m_pos if w in corpus.lower())
-                s_neg = sum(1 for w in m_neg if w in corpus.lower())
-                s_risk = sum(1 for w in m_risk if w in corpus.lower())
-                
-                bonus = 0.0
-                txt = "Neutre."
-                if pluie and pluie < 50: bonus -= 0.10
-                
-                if s_pos > s_neg: bonus += 0.10; txt = "✅ Tendance positive."
-                elif s_neg > s_pos: bonus -= 0.10; txt = "⚠️ Tendance négative."
-                
-                finance_danger = False
-                if s_risk > 0: 
-                    finance_danger = True
-                    txt += f"\n🚨 ALERTE ROUGE : Risques financiers détectés ({s_risk})."
-
-                res['ent'] = ent
-                res['valeur_entreprise'] = valeur_finale
-                res['source_ca'] = source_info
-                res['pluie_90j'] = pluie
-                res['doc_files'] = doc_names
-                res['s25_brut'] = res['s25']
-                
-                score_temp = res['s25'] * (1 - bonus)
-                if finance_danger:
-                    res['s25_display'] = 5.0
-                else:
-                    res['s25_display'] = min(5.0, score_temp)
-                
-                res['var'] = valeur_finale * (res['s25_display'] / 5) * 0.2
-                res['txt_ia'] = txt
-                res['news'] = news
-                res['wiki'] = wiki_txt
-                
-                st.session_state.audit_unique = res
-                st.rerun()
-            else:
-                st.error("Localisation impossible.")
-
-with c2:
-    if st.session_state.audit_unique:
-        r = st.session_state.audit_unique
-        st.success(f"Résultats : {r['ent']}")
-        
-        c0, c1, c2 = st.columns(3)
-        c0.metric("Valorisation", f"{r['valeur_entreprise']:,.0f} $", delta=r.get('source_ca',''))
-        c1.metric("Risque Final", f"{r['s25_display']:.2f}/5", delta="ALERTE" if r['s25_display'] == 5 else "Normal", delta_color="inverse")
-        c2.metric("Perte Estimée", f"{r['var']:,.0f} $", delta="VaR", delta_color="inverse")
-        
-        st.info(f"🤖 **Synthèse :** {r['txt_ia']}")
-        
-        t1, t2, t3, t4 = st.tabs(["📝 Notes", "📰 News", "📚 Wiki", "🌍 Météo"])
-        with t1: 
-             if r['doc_files']: st.write(f"📂 Docs: {', '.join(r['doc_files'])}")
-             st.text("..." + notes_manuelles[:200] + "...")
-        with t2:
-            if r['news']:
-                for n in r['news']: st.markdown(f"- [{n['title']}]({n['link']})")
-            else:
-                st.write("Pas de news environnementale critique.")
-        with t3: st.write(r['wiki'])
-        with t4: st.metric("Pluie Récente", f"{r['pluie_90j']} mm")
-
-        m = folium.Map([r['lat'], r['lon']], zoom_start=9, tiles="cartodbpositron")
-        folium.Marker([r['lat'], r['lon']], icon=folium.Icon(color="red")).add_to(m)
-        st_folium(m, height=250)
-        
-        pdf = create_pdf(r)
-        st.download_button("📄 Rapport PDF (Corrigé V9.4)", pdf, file_name="Rapport_Final.pdf")
-        
