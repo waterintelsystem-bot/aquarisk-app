@@ -13,3 +13,4 @@ wikipedia
 pdfplumber
 yfinance
 thefuzz
+python-levenshtein
