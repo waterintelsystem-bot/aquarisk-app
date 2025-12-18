@@ -341,4 +341,3 @@ with tab2:
         with pd.ExcelWriter(buffer_out, engine='xlsxwriter') as writer:
             df_final.to_excel(writer, index=False)
         st.download_button("📥 Télécharger les Résultats (Excel)", data=buffer_out.getvalue(), file_name="Resultats_AquaRisk.xlsx", mime="application/vnd.ms-excel")
-        
