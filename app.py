@@ -21,8 +21,8 @@ from datetime import datetime, timedelta
 from staticmap import StaticMap, CircleMarker
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="AquaRisk 9.3 : Correctif News", page_icon="🧿", layout="wide")
-st.title("🧿 AquaRisk 9.3 : Version Finalisée (News Locales)")
+st.set_page_config(page_title="AquaRisk 9.4 : Filtre Strict", page_icon="🛡️", layout="wide")
+st.title("🛡️ AquaRisk 9.4 : Filtrage Pertinence & Environnement")
 
 # --- INITIALISATION ---
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
@@ -65,9 +65,8 @@ if df_actuel is None or df_futur is None: st.stop()
 # --- 2. FONCTIONS TECH ---
 def get_location_safe(ville, pays):
     try:
-        ua = f"Fix_V93_{randint(100,999)}"
+        ua = f"Fix_V94_{randint(100,999)}"
         geolocator = Nominatim(user_agent=ua, timeout=5)
-        # Force l'anglais pour la cohérence des noms de pays
         loc = geolocator.geocode(f"{ville}, {pays}", language='en')
         if loc: return loc
     except: return None
@@ -79,7 +78,7 @@ def trouver_meilleur_nom(nom_cherche, liste_options, seuil=75):
     if score >= seuil: return meilleur_match
     return None
 
-# --- 3. SOURCES EXTERNES (CORRECTION NEWS) ---
+# --- 3. SOURCES EXTERNES (CORRECTION NEWS STRICTE) ---
 def get_weather_history(lat, lon):
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
@@ -93,7 +92,6 @@ def get_weather_history(lat, lon):
     return None
 
 def get_wiki_summary(company_name, lang='fr'):
-    # Adapte la langue de Wikipedia
     wikipedia.set_lang(lang)
     try: return wikipedia.page(company_name).summary[:1500]
     except: return ""
@@ -110,34 +108,47 @@ def scan_website(url):
     return ""
 
 def get_company_news(company_name, country="France"):
-    # --- CORRECTION MAJEURE V9.3 ---
-    # Détection de la région pour interroger le bon Google News
+    # --- FILTRE STRICT ANTI-HS ---
     is_france = "france" in country.lower().strip()
-    
     def clean(r): return re.sub(re.compile('<.*?>'), '', r).replace("&nbsp;", " ").replace("&#39;", "'")
 
+    # Mots clés ciblés uniquement sur l'EAU et l'ENVIRONNEMENT pour éviter les sujets sociétaux (LGBT, Politique...)
     if is_france:
-        # Mode France : Mots clés FR + Google.fr
-        # On utilise des guillemets pour forcer la recherche exacte
-        q = urllib.parse.quote(f'"{company_name}" environnement pollution scandale')
+        q = urllib.parse.quote(f'"{company_name}" (eau OR pollution OR sécheresse OR environnement)')
         rss_url = f"https://news.google.com/rss/search?q={q}&hl=fr-FR&gl=FR&ceid=FR:fr"
     else:
-        # Mode Monde : Mots clés EN + Google.com
-        q = urllib.parse.quote(f'"{company_name}" environment risk pollution')
+        q = urllib.parse.quote(f'"{company_name}" (water OR pollution OR drought OR environment)')
         rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
 
     try:
         feed = feedparser.parse(rss_url)
         items = []
-        # On vérifie si le flux renvoie vraiment des résultats liés à la recherche
-        # Google renvoie parfois des "Top Stories" génériques si rien n'est trouvé.
-        # On filtre grossièrement.
-        for e in feed.entries[:5]:
+        
+        # On découpe le nom de l'entreprise pour vérifier la présence d'au moins un mot clé du nom
+        # Ex: Pour "Michel et Augustin", on veut trouver "Michel" et "Augustin" ou la phrase entière
+        name_parts = company_name.lower().split()
+        main_keyword = name_parts[0] if len(name_parts) > 0 else company_name.lower()
+
+        for e in feed.entries:
             title = e.title.lower()
-            # Si le nom de l'entreprise n'est pas dans le titre OU le résumé, c'est suspect
-            # Sauf si c'est une très grosse boite, on garde tout.
-            summary = clean(e.summary if 'summary' in e else e.title)
-            items.append({"title": e.title, "link": e.link, "summary": summary[:250]})
+            summary = clean(e.summary if 'summary' in e else e.title).lower()
+            full_content = title + " " + summary
+            
+            # FILTRE 1 : L'entreprise DOIT être citée
+            if main_keyword not in full_content:
+                continue # On saute cet article, c'est du bruit (ex: Danone)
+            
+            # FILTRE 2 : On évite les sujets sociétaux hors-sujet si possible
+            # (Optionnel, mais aide à nettoyer)
+            
+            items.append({
+                "title": e.title,
+                "link": e.link,
+                "summary": clean(e.summary if 'summary' in e else e.title)[:250]
+            })
+            
+            if len(items) >= 5: break # On s'arrête à 5 bons résultats
+            
         return items
     except: return []
 
@@ -255,7 +266,7 @@ def create_pdf(data):
     pdf.add_page()
     
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, clean(f"AUDIT V9.3: {data['ent'].upper()}"), ln=1, align='C')
+    pdf.cell(0, 10, clean(f"AUDIT V9.4: {data['ent'].upper()}"), ln=1, align='C')
     pdf.ln(5)
     
     pdf.set_font("Arial", size=11)
@@ -289,7 +300,7 @@ def create_pdf(data):
         for n in data['news']: pdf.cell(0, 5, clean(f"- {n['title'][:90]}"), ln=1)
     else:
         pdf.set_font("Arial", 'I', 9)
-        pdf.cell(0, 5, "Aucune actualite pertinente trouvee.", ln=1)
+        pdf.cell(0, 5, "Pas de news environnementale critique trouvee.", ln=1)
 
     if data.get('wiki'):
         pdf.ln(5)
@@ -330,7 +341,8 @@ with c1:
                 st.session_state.auto_val = mcap
                 st.success(f"Valo trouvée : {mcap:,.0f} $")
             else:
-                st.error("Erreur Bourse (API Timeout). Entrez la valeur manuellement.")
+                st.error("Erreur Bourse. Valeur par défaut utilisée.")
+        
         val_default = st.session_state.auto_val if st.session_state.auto_val > 0 else 1000000.0
         valeur_finale = st.number_input("Valo ($)", value=val_default)
         source_info = f"Bourse ({ticker})"
@@ -363,13 +375,9 @@ with c1:
         with st.spinner("Analyse Intégrale..."):
             res = analyser_site(v, p)
             if res and res['found']:
-                # APPEL AVEC LE PAYS POUR AVOIR LES BONNES NEWS
                 news = get_company_news(ent, country=p)
-                
-                # ADAPTATION WIKIPEDIA
                 wiki_lang = 'fr' if "france" in p.lower() else 'en'
                 wiki_txt = get_wiki_summary(ent, lang=wiki_lang)
-                
                 web_txt = scan_website(website)
                 pluie = get_weather_history(res['lat'], res['lon'])
                 doc_text, doc_names = extract_text_from_pdfs(uploaded_docs)
@@ -393,7 +401,7 @@ with c1:
                 finance_danger = False
                 if s_risk > 0: 
                     finance_danger = True
-                    txt += f"\n🚨 ALERTE ROUGE : Risques financiers détectés ({s_risk}). SCORE MAXIMAL APPLIQUÉ."
+                    txt += f"\n🚨 ALERTE ROUGE : Risques financiers détectés ({s_risk})."
 
                 res['ent'] = ent
                 res['valeur_entreprise'] = valeur_finale
@@ -438,7 +446,7 @@ with c2:
             if r['news']:
                 for n in r['news']: st.markdown(f"- [{n['title']}]({n['link']})")
             else:
-                st.write("Aucune news pertinente trouvée.")
+                st.write("Pas de news environnementale critique.")
         with t3: st.write(r['wiki'])
         with t4: st.metric("Pluie Récente", f"{r['pluie_90j']} mm")
 
@@ -447,5 +455,5 @@ with c2:
         st_folium(m, height=250)
         
         pdf = create_pdf(r)
-        st.download_button("📄 Rapport PDF (Corrigé V9.3)", pdf, file_name="Rapport_Final.pdf")
+        st.download_button("📄 Rapport PDF (Corrigé V9.4)", pdf, file_name="Rapport_Final.pdf")
         
