@@ -12,3 +12,4 @@ requests
 wikipedia
 pdfplumber
 yfinance
+thefuzz
