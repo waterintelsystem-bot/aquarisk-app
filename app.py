@@ -18,10 +18,11 @@ import pdfplumber
 import yfinance as yf
 from thefuzz import process
 from datetime import datetime, timedelta
+from staticmap import StaticMap, CircleMarker # <--- NOUVEAU MODULE CARTE
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="AquaRisk 9.0 : Intégral", page_icon="🧿", layout="wide")
-st.title("🧿 AquaRisk 9.0 : Finance, Risque & Recherche Documentaire")
+st.set_page_config(page_title="AquaRisk 9.1", page_icon="🗺️", layout="wide")
+st.title("🗺️ AquaRisk 9.1 : Rapport Complet avec Carte")
 
 # --- INITIALISATION ---
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
@@ -62,7 +63,7 @@ if df_actuel is None or df_futur is None: st.stop()
 
 # --- 2. FONCTIONS TECH ---
 def get_location_safe(ville, pays):
-    agents = ["Aqua_V9", "Full_Scanner", "Geo_Risk_Pro"]
+    agents = ["Map_Gen_V9", "Risk_Bot_Graphic", "Geo_Tool_Pro"]
     for i in range(3):
         try:
             ua = f"{agents[i]}_{randint(100,999)}"
@@ -78,7 +79,7 @@ def trouver_meilleur_nom(nom_cherche, liste_options, seuil=75):
     if score >= seuil: return meilleur_match
     return None
 
-# --- 3. MODULES RECHERCHE (WEB, NEWS, WIKI) ---
+# --- 3. SOURCES EXTERNES ---
 def get_weather_history(lat, lon):
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
@@ -103,13 +104,11 @@ def scan_website(url):
         r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, 'html.parser')
-            # On prend les paragraphes
             return ' '.join([p.text for p in soup.find_all('p')])[:5000]
     except: return ""
     return ""
 
 def get_company_news(company_name):
-    # Recherche élargie
     query = urllib.parse.quote(f"{company_name} water environment risk")
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
     def clean(r): return re.sub(re.compile('<.*?>'), '', r).replace("&nbsp;", " ").replace("&#39;", "'")
@@ -132,7 +131,7 @@ def extract_text_from_pdfs(uploaded_files):
         except: continue
     return full_text, file_names
 
-# --- 4. MODULES FINANCE ---
+# --- 4. FINANCE ---
 def get_pappers_financials(company_name, api_key):
     if not api_key: return None
     try:
@@ -175,7 +174,6 @@ def analyser_site(ville, pays, region_forcee=None):
     except: pass
     
     reg_cible = region_forcee if region_forcee else reg_gps
-    
     liste_pays = df_actuel['name_0'].unique()
     pays_trouve = trouver_meilleur_nom(pays, liste_pays, seuil=70)
     
@@ -210,7 +208,25 @@ def analyser_site(ville, pays, region_forcee=None):
         "s25": s25, "s30": s30, "found": True
     }
 
-# --- 6. PDF COMPLET ---
+# --- 6. GENERATION IMAGE CARTE (NOUVEAU) ---
+def generer_image_carte(lat, lon):
+    try:
+        # On crée une carte statique de 800x400 pixels
+        m = StaticMap(800, 400)
+        # On ajoute un marqueur rouge (Attention: StaticMap utilise lon, lat)
+        marker = CircleMarker((lon, lat), 'red', 18)
+        m.add_marker(marker)
+        # On rend l'image
+        image = m.render(zoom=10)
+        # On sauvegarde temporairement
+        img_path = "temp_map.png"
+        image.save(img_path)
+        return img_path
+    except Exception as e:
+        print(f"Erreur carte statique: {e}")
+        return None
+
+# --- 7. PDF ---
 def create_pdf(data):
     def clean(t): return str(t).encode('latin-1', 'replace').decode('latin-1')
     pdf = FPDF()
@@ -218,10 +234,10 @@ def create_pdf(data):
     
     # TITRE
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, clean(f"AUDIT V9: {data['ent'].upper()}"), ln=1, align='C')
-    pdf.ln(10)
+    pdf.cell(0, 10, clean(f"AUDIT V9.1: {data['ent'].upper()}"), ln=1, align='C')
+    pdf.ln(5)
     
-    # INFOS CLES
+    # INFOS
     pdf.set_font("Arial", size=11)
     pdf.cell(0, 10, clean(f"Loc: {data['ville']} ({data['region']}, {data['pays']})"), ln=1)
     if data.get('valeur_entreprise'):
@@ -229,13 +245,18 @@ def create_pdf(data):
     pdf.cell(0, 10, clean(f"VaR Climatique: -{data['var']:,.0f} $"), ln=1)
     pdf.ln(5)
 
-    # METEO & DOCS
-    if data['pluie_90j']: pdf.cell(0, 10, clean(f"Meteo (90j): {data['pluie_90j']} mm"), ln=1)
-    if data.get('doc_files'):
-        pdf.set_font("Arial", 'I', 9)
-        pdf.cell(0, 10, clean(f"Docs Analyses: {', '.join(data['doc_files'])}"), ln=1)
-    pdf.ln(5)
-    
+    # --- INSERTION DE LA CARTE (NOUVEAU) ---
+    # On génère l'image au moment du PDF
+    map_file = generer_image_carte(data['lat'], data['lon'])
+    if map_file and os.path.exists(map_file):
+        # On place l'image (x, y, width)
+        pdf.image(map_file, x=10, w=190)
+        pdf.ln(5) # Saut de ligne après l'image
+    else:
+        pdf.set_font("Arial", 'I', 10)
+        pdf.cell(0, 10, "(Carte indisponible pour le PDF)", ln=1)
+    # ---------------------------------------
+
     # SCORE
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, f"Score Risque: {data['s25_display']:.2f} / 5", ln=1)
@@ -246,29 +267,20 @@ def create_pdf(data):
     pdf.multi_cell(0, 6, clean(f"Synthese IA:\n{data['txt_ia']}"))
     pdf.ln(10)
 
-    # --- SECTION SOURCES (RÉINTÉGRÉE !) ---
+    # SOURCES
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "Sources & Bibliographie:", ln=1)
-    
-    # News
     if data['news']:
-        pdf.set_font("Arial", 'B', 10)
-        pdf.cell(0, 8, "Presse Recente:", ln=1)
-        pdf.set_font("Arial", size=8)
-        for n in data['news']:
-            pdf.cell(0, 5, clean(f"- {n['title'][:90]}"), ln=1)
-    
-    # Wiki
+        pdf.set_font("Arial", size=9)
+        for n in data['news']: pdf.cell(0, 5, clean(f"- {n['title'][:90]}"), ln=1)
     if data.get('wiki'):
         pdf.ln(5)
-        pdf.set_font("Arial", 'B', 10)
-        pdf.cell(0, 8, "Wikipedia Context:", ln=1)
         pdf.set_font("Arial", 'I', 8)
-        pdf.multi_cell(0, 4, clean(f"{data['wiki'][:500]}..."))
+        pdf.multi_cell(0, 4, clean(f"{data['wiki'][:600]}..."))
         
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
-# --- 7. INTERFACE ---
+# --- 8. INTERFACE ---
 with st.sidebar:
     st.header("⚙️ API Keys")
     pappers_key = st.text_input("Pappers (France)", type="password")
@@ -279,19 +291,12 @@ with c1:
     ent = st.text_input("Nom Entreprise", "Danone")
     v = st.text_input("Ville", "Paris")
     p = st.text_input("Pays", "France")
-    website = st.text_input("Site Web (Optionnel)", "")
+    website = st.text_input("Site Web", "")
     
-    # BOUTONS CHASSEUR DE RAPPORTS (NOUVEAU)
-    st.caption("🔍 **Chasseur de Rapports** (Liens rapides)")
-    col_search1, col_search2 = st.columns(2)
-    with col_search1:
-        # Génère un lien Google vers les rapports PDF
-        q_pdf = urllib.parse.quote(f"{ent} rapport développement durable filetype:pdf")
-        st.markdown(f"[📄 Trouver Rapports PDF](https://www.google.com/search?q={q_pdf})", unsafe_allow_html=True)
-    with col_search2:
-        # Génère un lien Google News
-        q_news = urllib.parse.quote(f"{ent} pollution amende")
-        st.markdown(f"[📰 Vérifier Scandales](https://www.google.com/search?q={q_news})", unsafe_allow_html=True)
+    st.caption("🔍 **Chasseur de Rapports**")
+    col_s1, col_s2 = st.columns(2)
+    with col_s1: st.markdown(f"[📄 PDF Google](https://www.google.com/search?q={urllib.parse.quote(ent + ' rapport durable filetype:pdf')})", unsafe_allow_html=True)
+    with col_s2: st.markdown(f"[📰 Scandales](https://www.google.com/search?q={urllib.parse.quote(ent + ' pollution amende')})", unsafe_allow_html=True)
 
     st.markdown("---")
     st.subheader("2. Finance")
@@ -316,7 +321,7 @@ with c1:
         if st.session_state.pappers_data:
             ca_val = float(st.session_state.pappers_data['ca'])
             source_info = f"Pappers ({st.session_state.pappers_data['annee']})"
-            st.success(f"CA Pappers : {ca_val:,.0f} €")
+            st.success(f"CA: {ca_val:,.0f} €")
             
         ca = st.number_input("Chiffre d'Affaires", value=ca_val)
         secteur = st.selectbox("Secteur", ["Industrie (0.8x)", "Tech (5.0x)", "Agri (1.0x)"])
@@ -324,26 +329,21 @@ with c1:
         valeur_finale = st.number_input("Valo Retenue", value=ca * coeffs[secteur])
 
     st.markdown("---")
-    st.write("📂 **3. Data Room (Intégration)**")
-    # NOTES MANUELLES (RETOUR)
-    notes_manuelles = st.text_area("📋 Notes & Extraits (Collez du texte ici)", height=100)
+    st.write("📂 **3. Data Room**")
+    notes_manuelles = st.text_area("📋 Notes Manuelles", height=100)
     uploaded_docs = st.file_uploader("Drop PDF", type=["pdf"], accept_multiple_files=True)
     
     if st.button("🚀 AUDIT COMPLET"):
         with st.spinner("Analyse Intégrale..."):
             res = analyser_site(v, p)
             if res and res['found']:
-                # Collecte
                 news = get_company_news(ent)
                 web_txt = scan_website(website)
                 wiki_txt = get_wiki_summary(ent)
                 pluie = get_weather_history(res['lat'], res['lon'])
                 doc_text, doc_names = extract_text_from_pdfs(uploaded_docs)
                 
-                # FUSION DE TOUTES LES SOURCES
                 corpus = f"{notes_manuelles} {web_txt} {wiki_txt} {doc_text} {' '.join([n['title'] for n in news])}"
-                
-                # Mots clés
                 m_pos = ['durable', 'recyclage', 'économie', 'biologique', 'iso 14001', 'b corp']
                 m_neg = ['pollution', 'plainte', 'fuite', 'non-conformité']
                 m_risk = ['provision', 'litige', 'amende', 'redressement', 'procès']
@@ -356,9 +356,9 @@ with c1:
                 txt = "Neutre."
                 if pluie and pluie < 50: bonus -= 0.10
                 
-                if s_pos > s_neg: bonus += 0.10; txt = "✅ Tendance positive (Sources concordantes)."
+                if s_pos > s_neg: bonus += 0.10; txt = "✅ Tendance positive."
                 elif s_neg > s_pos: bonus -= 0.10; txt = "⚠️ Tendance négative."
-                if s_risk > 0: bonus -= 0.20; txt += f"\n🚨 ALERTE: Risques financiers détectés ({s_risk})."
+                if s_risk > 0: bonus -= 0.20; txt += f"\n🚨 ALERTE: Risques financiers ({s_risk})."
 
                 res['ent'] = ent
                 res['valeur_entreprise'] = valeur_finale
@@ -389,10 +389,9 @@ with c2:
         
         st.info(f"🤖 **Synthèse :** {r['txt_ia']}")
         
-        t1, t2, t3, t4 = st.tabs(["📝 Notes & Docs", "📰 News", "📚 Wiki", "🌍 Météo"])
+        t1, t2, t3, t4 = st.tabs(["📝 Notes", "📰 News", "📚 Wiki", "🌍 Météo"])
         with t1: 
              if r['doc_files']: st.write(f"📂 Docs: {', '.join(r['doc_files'])}")
-             st.caption("Texte analysé (Extrait) :")
              st.text("..." + notes_manuelles[:200] + "...")
         with t2:
             for n in r['news']: st.markdown(f"- [{n['title']}]({n['link']})")
@@ -404,5 +403,5 @@ with c2:
         st_folium(m, height=250)
         
         pdf = create_pdf(r)
-        st.download_button("📄 Rapport PDF Complet (Sources incluses)", pdf, file_name="Rapport_V9.pdf")
+        st.download_button("📄 Rapport PDF (Avec Carte)", pdf, file_name="Rapport_Complet.pdf")
         
