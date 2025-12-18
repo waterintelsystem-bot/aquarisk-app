@@ -9,3 +9,5 @@ feedparser
 openpyxl
 beautifulsoup4
 requests
+wikipedia
+pdfplumber
