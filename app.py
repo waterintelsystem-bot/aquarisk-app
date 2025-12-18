@@ -14,17 +14,17 @@ import os
 import requests
 from bs4 import BeautifulSoup
 import wikipedia
-import pdfplumber # <--- LE LECTEUR DE DOCUMENTS PDF
+import pdfplumber
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="AquaRisk 7.0 : Data Room", page_icon="🗂️", layout="wide")
-st.title("🗂️ AquaRisk 7.0 : Audit Intégral (Data Room)")
+st.set_page_config(page_title="AquaRisk 7.1", page_icon="🗂️", layout="wide")
+st.title("🗂️ AquaRisk 7.1 : Audit PME & Grands Comptes")
 
 # --- INITIALISATION ---
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 
-# --- 1. CHARGEMENT DATA (ROBUSTE) ---
+# --- 1. CHARGEMENT DATA ---
 @st.cache_data
 def load_data():
     def smart_read(filename):
@@ -76,7 +76,7 @@ def get_region_safe(lat, lon):
         return geolocator.reverse(f"{lat}, {lon}", language='en')
     except: return None
 
-# --- 3. MODULES EXTERNES (WEB, WIKI, METEO) ---
+# --- 3. MODULES EXTERNES ---
 def get_weather_history(lat, lon):
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
@@ -115,26 +115,20 @@ def get_company_news(company_name):
         return [{"title": e.title, "link": e.link, "summary": clean(e.summary if 'summary' in e else e.title)[:200]} for e in feed.entries[:5]]
     except: return []
 
-# --- 4. MODULE LECTURE PDF (NOUVEAU) ---
+# --- 4. MODULE PDF ---
 def extract_text_from_pdfs(uploaded_files):
     full_text = ""
     file_names = []
-    
-    if not uploaded_files:
-        return "", []
-
+    if not uploaded_files: return "", []
     for pdf_file in uploaded_files:
         try:
             with pdfplumber.open(pdf_file) as pdf:
                 text = ""
-                # On lit max 10 pages pour ne pas surcharger la mémoire
                 for page in pdf.pages[:10]:
                     text += page.extract_text() or ""
                 full_text += text + " "
                 file_names.append(pdf_file.name)
-        except Exception as e:
-            st.error(f"Erreur lecture {pdf_file.name}: {e}")
-            
+        except: continue
     return full_text, file_names
 
 # --- 5. MOTEUR CENTRAL ---
@@ -150,7 +144,6 @@ def analyser_site(ville, pays, region_forcee=None):
     
     region_final = region_forcee if region_forcee else reg_auto
     
-    # Matching CSV
     mask_pays = df_actuel['name_0'].astype(str).str.lower().str.contains(pays.lower().strip(), na=False)
     df_pays = df_actuel[mask_pays]
     match_now = df_pays[df_pays['name_1'].astype(str).str.lower().str.contains(region_final.lower().strip(), na=False)]
@@ -167,22 +160,18 @@ def analyser_site(ville, pays, region_forcee=None):
         "found": not match_now.empty
     }
 
-# --- 6. PDF REPORT ---
+# --- 6. PDF EXPORT ---
 def create_pdf(data):
     def clean(t): return str(t).encode('latin-1', 'replace').decode('latin-1')
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, clean(f"AUDIT 7.0: {data['ent'].upper()}"), ln=1, align='C')
+    pdf.cell(0, 10, clean(f"AUDIT 7.1: {data['ent'].upper()}"), ln=1, align='C')
     pdf.ln(10)
-    
     pdf.set_font("Arial", size=12)
     pdf.cell(0, 10, clean(f"Loc: {data['loc']}"), ln=1)
     if data['pluie_90j']: pdf.cell(0, 10, clean(f"Pluie (90j): {data['pluie_90j']} mm"), ln=1)
-    
-    if data['doc_files']:
-        pdf.cell(0, 10, clean(f"Docs Analyses: {', '.join(data['doc_files'])}"), ln=1)
-        
+    if data['doc_files']: pdf.cell(0, 10, clean(f"Docs: {', '.join(data['doc_files'])}"), ln=1)
     pdf.ln(5)
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, f"Score Final: {data['s25_display']:.2f} / 5", ln=1)
@@ -196,65 +185,60 @@ c1, c2 = st.columns([1, 2])
 with c1:
     st.subheader("📁 Documents & Cible")
     
-    ent = st.text_input("Entreprise", "TotalEnergies")
+    ent = st.text_input("Entreprise", "PME Exemple")
     website = st.text_input("Site Web", "")
-    v = st.text_input("Ville", "Pau")
+    v = st.text_input("Ville", "Lyon")
     p = st.text_input("Pays", "France")
-    reg = st.text_input("Région", "Nouvelle-Aquitaine")
-    cap = st.number_input("Exposition ($)", 1000000)
+    reg = st.text_input("Région", "Auvergne-Rhône-Alpes")
+    
+    # --- CHANGEMENT ICI : INPUT FLEXIBLE ---
+    cap = st.number_input(
+        "Valeur de l'Actif / CA ($)", 
+        value=100000,   # Valeur par défaut plus basse (PME)
+        min_value=0,    # Pas de négatif
+        step=1000,      # On peut ajuster finement
+        help="Saisissez le montant total exposé au risque (Chiffre d'Affaires ou Valeur de l'usine)."
+    )
     
     st.markdown("---")
-    st.write("📂 **Data Room (Compta / RSE / Technique)**")
-    uploaded_docs = st.file_uploader("Glissez vos PDF ici (Bilan, Rapport...)", type=["pdf"], accept_multiple_files=True)
+    st.write("📂 **Data Room (Compta / RSE)**")
+    uploaded_docs = st.file_uploader("Drop PDF", type=["pdf"], accept_multiple_files=True)
     
-    if st.button("Lancer l'Audit Data Room"):
-        with st.spinner("Analyse: 🛰️GPS 🕷️Web 🌦️Météo 📄Lecture Docs..."):
+    if st.button("Lancer l'Audit"):
+        with st.spinner("Analyse complète en cours..."):
             res = analyser_site(v, p, reg)
             
             if res and res['found']:
-                # 1. DATA GATHERING
                 news = get_company_news(ent)
                 web_txt = scan_website(website)
                 wiki_txt = get_wiki_summary(ent, 'fr')
                 pluie = get_weather_history(res['lat'], res['lon'])
-                
-                # --- LE CŒUR DE LA V7 : LECTURE DOCS ---
                 doc_text, doc_names = extract_text_from_pdfs(uploaded_docs)
                 
-                # 2. IA ANALYSE
                 corpus = f"{web_txt} {wiki_txt} {doc_text} {' '.join([n['title'] for n in news])}"
-                
-                # Mots clés Environnementaux
-                m_pos = ['durable', 'iso 14001', 'recyclage', 'économie', 'traitement', 'épuration']
-                m_neg = ['pollution', 'rejet', 'dépassement', 'non-conformité', 'plainte', 'fuite']
-                
-                # Mots clés FINANCIERS (Nouveau !)
-                m_finance_risk = ['provision pour risque', 'litige en cours', 'amende', 'redressement', 'dommages et intérêts']
+                m_pos = ['durable', 'recyclage', 'économie', 'biologique', 'local', 'traitement']
+                m_neg = ['pollution', 'plainte', 'fuite', 'non-conformité', 'dépassement']
+                m_risk = ['provision', 'litige', 'amende', 'redressement', 'pénalité']
                 
                 s_pos = sum(1 for w in m_pos if w in corpus.lower())
                 s_neg = sum(1 for w in m_neg if w in corpus.lower())
-                s_fin_risk = sum(1 for w in m_finance_risk if w in corpus.lower())
+                s_risk = sum(1 for w in m_risk if w in corpus.lower())
                 
                 bonus = 0.0
                 txt = "Analyse neutre."
-                
-                # Bonus Hydrologie
                 if pluie is not None and pluie < 50: bonus -= 0.10
                 
-                # Bonus Sémantique
-                if s_pos > s_neg:
+                if s_pos > s_neg: 
                     bonus += 0.10
-                    txt = "✅ Tendance positive (Docs/Web)."
-                elif s_neg > s_pos:
+                    txt = "✅ Tendance positive."
+                elif s_neg > s_pos: 
                     bonus -= 0.10
-                    txt = "⚠️ Tendance négative détectée."
+                    txt = "⚠️ Tendance négative."
                 
-                # MALUS FINANCIER (Prioritaire)
-                if s_fin_risk > 0:
-                    bonus -= 0.20 # Gros malus
-                    txt += f"\n🚨 ALERTE COMPTABLE : {s_fin_risk} mentions de risques financiers (provisions/litiges) détectées dans les documents !"
+                if s_risk > 0:
+                    bonus -= 0.20
+                    txt += f"\n🚨 ALERTE COMPTABLE ({s_risk} mentions)."
 
-                # 3. RESULTATS
                 res['ent'] = ent
                 res['pluie_90j'] = pluie
                 res['doc_files'] = doc_names
@@ -275,22 +259,19 @@ with c1:
 with c2:
     if st.session_state.audit_unique:
         r = st.session_state.audit_unique
-        st.success(f"Audit Data Room : {r['ent']}")
+        st.success(f"Audit : {r['ent']}")
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Score Audit", f"{r['s25_display']:.2f}/5", delta=f"Base: {r['s25_brut']:.2f}", delta_color="inverse")
-        c2.metric("Météo", f"{r['pluie_90j']} mm" if r['pluie_90j'] else "N/A")
-        c3.metric("VaR", f"{r['var']:,.0f} $")
+        c1.metric("Score", f"{r['s25_display']:.2f}/5", delta=f"Base: {r['s25_brut']:.2f}", delta_color="inverse")
+        c2.metric("Météo (90j)", f"{r['pluie_90j']} mm" if r['pluie_90j'] else "N/A")
+        c3.metric("VaR Financière", f"{r['var']:,.0f} $") # La VaR se calcule avec le montant PME
         
         st.info(f"🤖 **Synthèse :** {r['txt_ia']}")
         
-        if r['doc_files']:
-            st.write(f"📂 **Documents analysés :** {', '.join(r['doc_files'])}")
+        if r['doc_files']: st.write(f"📂 Docs: {', '.join(r['doc_files'])}")
         
-        # Onglets
-        t1, t2, t3 = st.tabs(["📄 Contenu Docs", "📰 News", "📚 Wiki"])
-        with t1: 
-            st.caption("Le texte des PDF a été scanné pour chercher des provisions financières et risques légaux.")
+        t1, t2, t3 = st.tabs(["📄 Docs", "📰 News", "📚 Wiki"])
+        with t1: st.caption("Texte scanné pour risques financiers.")
         with t2:
             for n in r['news']: st.markdown(f"- [{n['title']}]({n['link']})")
         with t3:
@@ -301,5 +282,5 @@ with c2:
         st_folium(m, height=250)
         
         pdf = create_pdf(r)
-        st.download_button("📄 Rapport Audit Complet", pdf, file_name="Audit.pdf")
+        st.download_button("📄 Rapport Audit PDF", pdf, file_name="Audit.pdf")
         
