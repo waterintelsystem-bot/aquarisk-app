@@ -1,20 +1,17 @@
 import streamlit as st
 import pandas as pd
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
-import folium
-from streamlit_folium import st_folium
+# Importation sécurisée des librairies
+try:
+    from geopy.geocoders import Nominatim
+except: pass
 import time
 from random import randint
 from fpdf import FPDF
 import io
-import feedparser
-import urllib.parse
 import re
 import os
 import requests
 from bs4 import BeautifulSoup
-import wikipedia
 import pdfplumber
 import yfinance as yf
 from thefuzz import process
@@ -23,289 +20,412 @@ from staticmap import StaticMap, CircleMarker
 import xlsxwriter
 
 # ==============================================================================
-# 1. CONFIGURATION & STATE
+# 1. CONFIGURATION & SESSION (INIT)
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk V22 : Unstoppable", page_icon="🛡️", layout="wide")
-st.title("🛡️ AquaRisk V22 : Audit Résilient & OCR Panoramique")
+st.set_page_config(page_title="AquaRisk V23 : ULTIMATE", page_icon="💎", layout="wide")
+st.title("💎 AquaRisk V23 : Audit Complet (Finance, Bourse, Climat)")
 
-# Initialisation des variables
-state_vars = {
-    'finance_ca': 1000000.0, 'finance_res': 100000.0, 'finance_cap': 200000.0, 
-    'audit_unique': None, 'pappers_data': None, 'stock_data': {"mcap": 0, "ev": 0},
-    'pdf_financials': None, 'comparables': None, 'ocr_debug_text': ""
+# Initialisation SÉCURISÉE des variables de session
+# Cela empêche l'écran blanc si on recharge la page
+defaults = {
+    'finance_ca': 1000000.0, 
+    'finance_res': 100000.0, 
+    'finance_cap': 200000.0,
+    'finance_ebitda': 125000.0,
+    'audit_done': False, # Pour savoir si on a lancé un audit
+    'audit_data': {},    # Pour stocker les résultats
+    'stock_data': {"mcap": 0, "ev": 0},
+    'comparables': None,
+    'ocr_log': "En attente de fichier..."
 }
-for k, v in state_vars.items():
-    if k not in st.session_state: st.session_state[k] = v
+
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
 
 # ==============================================================================
-# 2. CHARGEMENT DATA (MODE INCASSABLE)
+# 2. CHARGEMENT DATA (MODE "SANS ÉCHEC")
 # ==============================================================================
 @st.cache_data
 def load_data_safe():
-    # Données par défaut (Hardcoded) pour garantir le démarrage
-    default_df = pd.DataFrame({
+    # Données par défaut pour que l'app ne plante JAMAIS
+    df_def = pd.DataFrame({
         'name_0': ['France', 'United States', 'Germany', 'China'],
         'score': [2.5, 3.8, 2.2, 4.1]
     })
     
-    df_now = default_df.copy()
-    df_fut = default_df.copy()
-    df_fut['score'] = df_fut['score'] * 1.1
-
-    # Tentative chargement CSV (Silencieuse)
+    # On essaie de lire les fichiers, sinon on prend le défaut
+    df_now, df_fut = df_def.copy(), df_def.copy()
+    
     try:
         if os.path.exists("risk_actuel.csv"):
-            temp = pd.read_csv("risk_actuel.csv", sep=None, engine='python', on_bad_lines='skip')
-            if 'name_0' in temp.columns: df_now = temp
-        
+            df_now = pd.read_csv("risk_actuel.csv", on_bad_lines='skip')
         if os.path.exists("risk_futur.csv"):
-            temp = pd.read_csv("risk_futur.csv", sep=None, engine='python', on_bad_lines='skip')
-            if 'name_0' in temp.columns: df_fut = temp
-    except:
-        pass # On ignore les erreurs et on garde les défauts
-
-    # Conversion numérique sécurisée
-    for df in [df_now, df_fut]:
-        if 'score' in df.columns:
-            df['score'] = pd.to_numeric(df['score'].astype(str).str.replace(',', '.'), errors='coerce')
+            df_fut = pd.read_csv("risk_futur.csv", on_bad_lines='skip')
+            
+        # Nettoyage colonnes
+        for df in [df_now, df_fut]:
+            df.columns = [c.lower().strip() for c in df.columns]
+            if 'score' in df.columns:
+                df['score'] = pd.to_numeric(df['score'].astype(str).str.replace(',', '.'), errors='coerce')
+    except: pass
             
     return df_now, df_fut
 
-# Chargement direct (Plus de Try/Except global bloquant)
 df_actuel, df_futur = load_data_safe()
 
 # ==============================================================================
-# 3. MOTEUR OCR V6 (PANORAMIQUE & ROBUSTE)
+# 3. MOTEUR OCR V7 (SPÉCIAL LIASSE FISCALE)
 # ==============================================================================
-def clean_number_str(s):
-    """Nettoie une chaine pour en faire un float (ex: '44 868 910' -> 44868910.0)"""
+def clean_number(text_num):
+    """Transforme '44 868 910' en 44868910.0"""
     try:
-        # Enlève tout sauf chiffres, virgule, point, moins
-        clean = re.sub(r'[^\d,\.-]', '', s.replace(' ', ''))
-        # Standardise décimale
+        # On supprime espaces, guillemets, parenthèses
+        clean = text_num.replace(' ', '').replace(')', '').replace('(', '-').replace("'", "").replace('"', "")
+        # On remplace virgule par point
         clean = clean.replace(',', '.')
-        # Si format 1.000.000.00 -> 1000000.00
-        if clean.count('.') > 1:
-            clean = clean.replace('.', '', clean.count('.') - 1)
+        # On garde uniquement chiffres, point, moins
+        clean = re.sub(r'[^\d.-]', '', clean)
         return float(clean)
     except: return None
 
-def extract_financials_panoramic(text):
-    """
-    Cherche les mots clés et scanne une fenêtre de texte autour (avant/après)
-    pour trouver les chiffres, même si la mise en page est décalée.
-    """
-    data = {"ca": 0, "resultat": 0, "capitaux": 0, "found": False}
+def extract_financials_smart(text):
+    """Cherche les données clés dans le texte brut du PDF"""
+    data = {"ca": 0, "res": 0, "cap": 0, "found": False}
     
-    # Dictionnaire de recherche
-    targets = {
-        "ca": ["CHIFFRES D'AFFAIRES NETS", "TOTAL DES PRODUITS D'EXPLOITATION", "VENTES DE MARCHANDISES"],
-        "resultat": ["BENEFICE OU PERTE", "RESULTAT DE L'EXERCICE", "RESULTAT NET"],
-        "capitaux": ["TOTAL CAPITAUX PROPRES", "CAPITAUX PROPRES"]
+    # 1. On découpe en lignes
+    lines = text.split('\n')
+    
+    # 2. Motifs de recherche (Regex souple)
+    # Cherche "Chiffre d'affaires" suivi de n'importe quoi, puis des chiffres
+    patterns = {
+        "ca": [r"CHIFFRES? D['’\s]?AFFAIRES?", r"TOTAL DES PRODUITS D['’\s]?EXPLOITATION", r"VENTES DE MARCHANDISES"],
+        "res": [r"BENEFICE OU PERTE", r"RESULTAT DE L['’\s]?EXERCICE", r"RESULTAT NET"],
+        "cap": [r"TOTAL CAPITAUX PROPRES", r"CAPITAUX PROPRES", r"SITUATION NETTE"]
     }
     
-    # On travaille sur le texte complet pour avoir le contexte
     text_upper = text.upper()
     
-    for metric, keywords in targets.items():
-        for kw in keywords:
-            if data[metric] != 0: break # Déjà trouvé
+    # Stratégie : On cherche le mot clé, puis on analyse les nombres sur la même ligne
+    for metric, keywords in patterns.items():
+        if data[metric] != 0: continue # Déjà trouvé
+        
+        for line in lines:
+            line_up = line.upper()
+            # Si un mot clé est présent (ou très proche via Fuzzy)
+            found_kw = any(k in line_up for k in keywords)
+            if not found_kw:
+                # Tentative Fuzzy (si > 90%)
+                best, score = process.extractOne(line_up, keywords)
+                if score > 90: found_kw = True
             
-            # Recherche de la position du mot clé
-            start_idx = text_upper.find(kw)
-            if start_idx != -1:
-                # On regarde une fenêtre de 300 caractères après le mot clé
-                window = text_upper[start_idx:start_idx+400]
+            if found_kw:
+                # Extraction de TOUS les nombres de la ligne
+                # Regex : attrape "10 000" ou "- 500.00"
+                nums_str = re.findall(r'-?\s*(?:\d{1,3}(?:\s\d{3})*|\d+)(?:[\.,]\d+)?', line)
                 
-                # On extrait tous les candidats numériques dans cette fenêtre
-                # Regex qui attrape "12 345" ou "- 12 345,00"
-                candidates = re.findall(r'-?\s*(?:\d{1,3}(?:\s\d{3})*|\d+)(?:[\.,]\d+)?', window)
-                
-                # Conversion et filtrage
                 valid_nums = []
-                for c in candidates:
-                    val = clean_number_str(c)
-                    # On élimine les années (2021, 2022) et les petits chiffres (notes, pages)
-                    if val and abs(val) > 2025: 
+                for ns in nums_str:
+                    val = clean_number(ns)
+                    # On ignore les années (2021, 2022) et les petits chiffres (notes)
+                    if val and abs(val) > 2030: 
                         valid_nums.append(val)
                 
                 if valid_nums:
-                    # HEURISTIQUE : 
-                    # Pour le CA : on prend souvent le plus grand chiffre
-                    if metric == "ca":
-                        data[metric] = max(valid_nums, key=abs)
-                    # Pour le Résultat/Capitaux : On prend le premier "gros" chiffre trouvé (souvent colonne N)
-                    else:
-                        data[metric] = valid_nums[0]
+                    # HEURISTIQUE :
+                    # CA : Souvent le plus grand chiffre
+                    if metric == "ca": data["ca"] = max(valid_nums, key=abs)
+                    # Résultat/Capitaux : Souvent le 1er chiffre (colonne N) ou le plus grand
+                    else: data[metric] = valid_nums[0]
                     
                     data["found"] = True
-
+                    break # On passe à la métrique suivante
     return data
 
-def extract_text_from_pdf(file):
+def read_pdf(file):
+    if not file: return ""
+    text = ""
     try:
-        file.seek(0)
-        text = ""
         with pdfplumber.open(file) as pdf:
-            # On lit jusqu'à 50 pages
-            for page in pdf.pages[:50]:
-                extract = page.extract_text()
-                if extract: text += extract + "\n"
-        return text
-    except: return ""
+            # On lit jusqu'à 50 pages pour trouver la liasse
+            for p in pdf.pages[:50]:
+                extracted = p.extract_text()
+                if extracted: text += extracted + "\n"
+    except: pass
+    return text
 
 # ==============================================================================
-# 4. FONCTIONS TECH (CLASSIQUES)
+# 4. FONCTIONS FINANCIERES & BOURSE
 # ==============================================================================
-# (Version simplifiée des fonctions pour garantir la stabilité)
-def get_pappers_financials(name, key):
-    if not key: return None
-    try:
-        r = requests.get(f"https://api.pappers.fr/v2/recherche?q={urllib.parse.quote(name)}&api_token={key}&par_page=1", timeout=5)
-        if r.status_code != 200: return None
-        data = r.json()
-        if not data['resultats']: return None
-        siren = data['resultats'][0]['siren']
+def get_comparables(sector):
+    """Récupère les données boursières via Yahoo Finance"""
+    # Mapping Secteur -> Tickers
+    mapping = {
+        "Agro": ["BN.PA", "NESN.SW", "KO"], # Danone, Nestlé, Coca
+        "Indus": ["AIR.PA", "SAF.PA", "SIE.DE"],
+        "Tech": ["DSY.PA", "CAP.PA", "MSFT"],
+        "BTP": ["DG.PA", "EN.PA", "HO.PA"],
+        "Comm": ["CA.PA", "WMT", "AMZN"]
+    }
+    # Fallback Agro par défaut
+    key = sector.split()[0][:4]
+    tickers = mapping.get(key, ["BN.PA"])
+    
+    data = []
+    for t in tickers:
+        try:
+            s = yf.Ticker(t)
+            i = s.info
+            pe = i.get('trailingPE', 'N/A')
+            pb = i.get('priceToBook', 'N/A')
+            mcap = i.get('marketCap', 0)
+            name = i.get('shortName', t)
+            
+            if mcap > 0:
+                data.append({
+                    "Société": name,
+                    "Ticker": t,
+                    "P/E Ratio": pe,
+                    "Valo (Mds)": f"{mcap/1e9:.1f} B$"
+                })
+        except: continue
         
-        fr = requests.get(f"https://api.pappers.fr/v2/entreprise?api_token={key}&siren={siren}", timeout=5)
-        fdata = fr.json()
-        
-        res = {"nom": data['resultats'][0]['nom_entreprise'], "ca": 0, "resultat": 0, "capitaux": 0}
-        for c in fdata.get('finances', []):
-            if c.get('annee_cloture_exercice'):
-                res['ca'] = c.get('chiffre_affaires', 0) or 0
-                res['resultat'] = c.get('resultat', 0) or 0
-                res['capitaux'] = c.get('capitaux_propres', 0) or 0
-                break
-        return res
-    except: return None
+    return pd.DataFrame(data)
 
-def analyser_risque_geo(ville, pays):
-    # Version simplifiée sans GPS externe pour éviter les timeouts
-    return {"ent": "N/A", "ville": ville, "pays": pays, "lat": 48.8566, "lon": 2.3522, "s2024": 2.5, "s2030": 3.0, "found": True}
+def calculate_ratios(ca, res, cap):
+    r = {}
+    r['Marge Nette'] = (res / ca * 100) if ca else 0
+    r['ROE'] = (res / cap * 100) if cap else 0
+    return r
 
-def create_pdf(data, notes):
+# ==============================================================================
+# 5. FONCTIONS PDF & EXCEL
+# ==============================================================================
+def create_pdf(data):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, f"AUDIT: {data.get('ent', 'N/A')}", ln=1, align='C')
+    pdf.cell(0, 10, f"AUDIT: {data.get('ent', '?')}", ln=1, align='C')
     pdf.ln(10)
-    pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, f"Valorisation: {data.get('valeur_entreprise', 0):,.0f} euros", ln=1)
-    pdf.cell(0, 10, f"CA: {data.get('ca', 0):,.0f} euros", ln=1)
-    if notes:
-        pdf.ln(5)
-        pdf.multi_cell(0, 5, f"Notes: {notes}")
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "1. SYNTHESE FINANCIERE", ln=1)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(0, 8, f"Valorisation Retenue: {data.get('valo',0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Chiffre d'Affaires: {data.get('ca',0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Resultat Net: {data.get('res',0):,.0f} EUR", ln=1)
+    
+    pdf.ln(5)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "2. RISQUE CLIMATIQUE (EAU)", ln=1)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(0, 8, f"Score Risque 2030: {data.get('s30',0):.2f} / 5", ln=1)
+    pdf.cell(0, 8, f"Impact Financier (VaR): {data.get('var',0):,.0f} EUR", ln=1)
+    
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
-# ==============================================================================
-# 5. INTERFACE
-# ==============================================================================
-with st.sidebar:
-    st.header("⚙️ Config")
-    pappers_key = st.text_input("Clé Pappers", type="password")
-
-c1, c2 = st.columns([1, 2])
-
-with c1:
-    st.subheader("1. Cible")
-    ent = st.text_input("Nom", "Michel et Augustin")
-    v = st.text_input("Ville", "Issy-les-Moulineaux")
-    p = st.text_input("Pays", "France")
+def create_excel(data):
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    worksheet = workbook.add_worksheet()
     
-    st.markdown("---")
-    st.subheader("2. Finance (OCR)")
-    mode_val = st.radio("Type", ["Non Cotée", "Cotée", "Startup"])
+    # Headers
+    headers = ["Indicateur", "Valeur", "Unité"]
+    for col, h in enumerate(headers): worksheet.write(0, col, h)
     
-    if mode_val == "Non Cotée":
-        col_api, col_pdf = st.columns(2)
-        
-        # PAPPERS
-        with col_api:
-            if st.button("🔍 Pappers"):
-                with st.spinner("API..."):
-                    i = get_pappers_financials(ent, pappers_key)
-                    if i:
-                        st.session_state.finance_ca = float(i['ca'])
-                        st.session_state.finance_res = float(i['resultat'])
-                        st.session_state.finance_cap = float(i['capitaux'])
-                        st.success("Données Pappers !")
-        
-        # PDF OCR
-        with col_pdf:
-            uploaded_bilan = st.file_uploader("Bilan PDF", type=["pdf"])
-            if uploaded_bilan:
-                with st.spinner("Analyse du PDF..."):
-                    # 1. Extraction Texte
-                    raw_text = extract_text_from_pdf(uploaded_bilan)
-                    st.session_state.ocr_debug_text = raw_text # Sauvegarde pour debug
-                    
-                    # 2. Analyse Financière
-                    fin = extract_financials_panoramic(raw_text)
-                    
-                    if fin['found']:
-                        st.session_state.finance_ca = float(fin['ca'])
-                        st.session_state.finance_res = float(fin['resultat'])
-                        st.session_state.finance_cap = float(fin['capitaux'])
-                        st.success("✅ Chiffres extraits !")
-                        st.dataframe(pd.DataFrame([fin]))
-                    else:
-                        st.warning("Pas de chiffres clairs trouvés.")
-
-        # ZONE DE DEBUG (Pour comprendre ce qui se passe)
-        with st.expander("🕵️‍♂️ Voir le texte lu par le robot"):
-            st.text(st.session_state.ocr_debug_text[:2000])
-
-        # INPUTS (Connectés à la mémoire)
-        m_pme = st.selectbox("Méthode", ["Multiple CA", "Multiple EBITDA", "DCF", "Patrimonial"])
-        valeur_finale = 0.0
-        
-        if "Multiple CA" in m_pme:
-            # On affiche la valeur de la mémoire par défaut
-            base = st.number_input("CA (€)", value=st.session_state.finance_ca)
-            mult = st.slider("Coeff", 0.1, 5.0, 1.5)
-            valeur_finale = base * mult
-        elif "Multiple EBITDA" in m_pme:
-            # Approx EBITDA
-            def_ebitda = st.session_state.finance_res * 1.25 if st.session_state.finance_res > 0 else 0
-            base = st.number_input("EBITDA (€)", value=def_ebitda)
-            mult = st.slider("Coeff", 1.0, 15.0, 7.0)
-            valeur_finale = base * mult
-        elif "DCF" in m_pme:
-            fcf = st.number_input("FCF (€)", value=st.session_state.finance_res)
-            valeur_finale = fcf * 10 # Simplifié pour l'exemple
-        else:
-            cap = st.number_input("Capitaux (€)", value=st.session_state.finance_cap)
-            valeur_finale = cap
+    # Rows
+    rows = [
+        ("Entreprise", data.get('ent'), "Nom"),
+        ("Valorisation", data.get('valo'), "EUR"),
+        ("Chiffre d'Affaires", data.get('ca'), "EUR"),
+        ("Résultat Net", data.get('res'), "EUR"),
+        ("Score Eau 2030", data.get('s30'), "/5"),
+        ("Impact VaR", data.get('var'), "EUR")
+    ]
+    
+    for row_idx, row_data in enumerate(rows):
+        for col_idx, cell_data in enumerate(row_data):
+            worksheet.write(row_idx+1, col_idx, cell_data)
             
-        st.metric("Valorisation", f"{valeur_finale:,.0f} €")
+    workbook.close()
+    return output.getvalue()
 
-    elif mode_val == "Cotée":
-        valeur_finale = st.number_input("Market Cap", 1000000.0)
-    else:
-        valeur_finale = st.slider("Valo VC", 1000000.0, 50000000.0)
+# ==============================================================================
+# 6. INTERFACE UTILISATEUR (LAYOUT)
+# ==============================================================================
+# Sidebar
+with st.sidebar:
+    st.header("Paramètres")
+    api_key = st.text_input("Clé Pappers (Optionnel)", type="password")
+    st.info("💡 Sans clé, utilisez l'OCR PDF ou la saisie manuelle.")
 
+# Colonnes principales
+col_left, col_right = st.columns([1, 1.5])
+
+# --- COLONNE GAUCHE : SAISIE ---
+with col_left:
+    st.subheader("1. Entreprise & Données")
+    
+    ent_name = st.text_input("Nom", "Michel et Augustin")
+    ville = st.text_input("Ville (Siège)", "Issy-les-Moulineaux")
+    pays = st.text_input("Pays", "France")
+    
     st.markdown("---")
-    if st.button("Générer Rapport"):
-        res_geo = analyser_risque_geo(v, p)
+    st.subheader("2. Finance")
+    
+    type_ent = st.radio("Type", ["Non Cotée (PME)", "Cotée (Bourse)", "Startup (VC)"])
+    
+    # SECTEUR (Pour Risque & Comparables)
+    secteur = st.selectbox("Secteur d'Activité", 
+                           ["Agroalimentaire (100% Vulnérable)", 
+                            "Industrie (70% Vulnérable)", 
+                            "BTP (40% Vulnérable)", 
+                            "Logiciel (5% Vulnérable)"])
+    vuln_factor = float(re.findall(r'\d+', secteur)[0]) / 100
+    
+    # --- LOGIQUE SPECIFIQUE ---
+    val_finale = 0.0
+    
+    if type_ent == "Non Cotée (PME)":
+        # ZONE PDF
+        st.caption("📄 Glissez votre Liasse Fiscale / Bilan PDF")
+        uploaded_pdf = st.file_uploader("Upload PDF", type=["pdf"])
         
-        final_data = {
-            "ent": ent, "valeur_entreprise": valeur_finale, 
-            "ca": st.session_state.finance_ca, "res": st.session_state.finance_res,
-            "s2024": res_geo['s2024'], "s2030": res_geo['s2030']
-        }
-        st.session_state.audit_unique = final_data
-        st.rerun()
+        if uploaded_pdf:
+            # Lecture OCR Immédiate
+            if st.button("🧠 Analyser le PDF"):
+                with st.spinner("Lecture intelligente..."):
+                    raw_text = read_pdf(uploaded_pdf)
+                    fin_data = extract_financials_smart(raw_text)
+                    
+                    if fin_data['found']:
+                        # MISE A JOUR SESSION STATE
+                        st.session_state.finance_ca = fin_data['ca']
+                        st.session_state.finance_res = fin_data['res']
+                        st.session_state.finance_cap = fin_data['cap']
+                        # Approx EBITDA
+                        st.session_state.finance_ebitda = fin_data['res'] * 1.25
+                        st.success("✅ Données extraites !")
+                        st.session_state.ocr_log = f"CA: {fin_data['ca']:,.0f} | Res: {fin_data['res']:,.0f}"
+                    else:
+                        st.warning("⚠️ Pas de chiffres nets trouvés. Saisie manuelle requise.")
+                        st.session_state.ocr_log = "Échec OCR"
+        
+        if st.session_state.ocr_log != "En attente de fichier...":
+            st.caption(f"Log OCR: {st.session_state.ocr_log}")
 
-with c2:
-    if st.session_state.audit_unique:
-        r = st.session_state.audit_unique
-        st.header(f"Résultats : {r['ent']}")
+        # CHAMPS DE SAISIE (Pré-remplis par session_state)
+        # Note : On utilise key= pour lier au session_state
+        methode = st.selectbox("Méthode Valo", ["Multiple CA", "Multiple EBITDA", "DCF"])
         
-        k1, k2 = st.columns(2)
-        k1.metric("Valorisation", f"{r['valeur_entreprise']:,.0f} €")
-        k2.metric("Risque Eau 2030", f"{r['s2030']}/5")
+        if methode == "Multiple CA":
+            ca_input = st.number_input("Chiffre d'Affaires (€)", key="finance_ca")
+            mult = st.slider("Multiple", 0.5, 5.0, 1.5)
+            val_finale = ca_input * mult
+            
+        elif methode == "Multiple EBITDA":
+            ebitda_input = st.number_input("EBITDA (€)", key="finance_ebitda")
+            mult = st.slider("Multiple", 2.0, 15.0, 7.0)
+            val_finale = ebitda_input * mult
+            
+        elif methode == "DCF":
+            fcf_input = st.number_input("Flux Trésorerie (FCF) (€)", key="finance_res")
+            wacc = st.number_input("WACC (%)", 5.0, 15.0, 10.0) / 100
+            g = st.number_input("Croissance (%)", 0.0, 5.0, 2.0) / 100
+            if wacc > g: val_finale = fcf_input * (1+g)/(wacc-g)
+            
+    elif type_ent == "Cotée (Bourse)":
+        ticker = st.text_input("Ticker Yahoo", "BN.PA")
+        if st.button("Charger Cours"):
+            try:
+                info = yf.Ticker(ticker).info
+                mcap = info.get('marketCap', 0)
+                st.session_state.stock_data['mcap'] = mcap
+                st.success(f"Market Cap: {mcap:,.0f}")
+            except: st.error("Ticker inconnu")
+        val_finale = st.number_input("Valo Boursière", value=float(st.session_state.stock_data['mcap']))
         
-        pdf_bytes = create_pdf(r, "Notes utilisateur...")
-        st.download_button("Télécharger PDF", pdf_bytes, file_name="audit.pdf")
+    else: # Startup
+        stade = st.selectbox("Stade", ["Seed (2-8M)", "Series A (8-30M)", "Series B (30-80M)"])
+        ranges = {"Seed": (2e6, 8e6), "Series A": (8e6, 30e6), "Series B": (30e6, 80e6)}
+        mini, maxi = ranges.get(stade.split()[0], (1e6, 5e6))
+        val_finale = st.slider("Valo VC (€)", mini, maxi, (mini+maxi)/2)
+
+    # BOUTON PRINCIPAL
+    st.markdown("---")
+    if st.button("🚀 LANCER L'AUDIT COMPLET", type="primary"):
+        # Calculs Climat
+        s24 = 2.5 # Simulé (ou via CSV si dispo)
+        s30 = s24 * 1.1 # Dégradation par défaut
+        
+        # VaR
+        delta_risk = s30 - s24
+        var_amount = val_finale * (delta_risk / 5.0) * vuln_factor
+        
+        # Stockage
+        st.session_state.audit_data = {
+            "ent": ent_name, "ville": ville, "valo": val_finale,
+            "ca": st.session_state.finance_ca, "res": st.session_state.finance_res,
+            "s24": s24, "s30": s30, "var": var_amount, "vuln": vuln_factor
+        }
+        st.session_state.audit_done = True
+        
+        # Comparables
+        st.session_state.comparables = get_comparables(secteur)
+
+# --- COLONNE DROITE : RÉSULTATS ---
+with col_right:
+    st.subheader("📊 Tableau de Bord")
+    
+    if st.session_state.audit_done:
+        d = st.session_state.audit_data
+        
+        # 1. KPIs
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Valorisation", f"{d['valo']:,.0f} €")
+        k2.metric("Risque Eau 2030", f"{d['s30']:.2f}/5", delta=f"{d['s30']-d['s24']:.2f}", delta_color="inverse")
+        
+        # VaR Couleur
+        var_col = "inverse" if d['var'] > 0 else "normal"
+        lbl_var = f"-{abs(d['var']):,.0f} €" if d['var'] > 0 else "Stable"
+        k3.metric("Impact Financier", lbl_var, delta="VaR 2030", delta_color=var_col)
+        
+        # 2. Ratios
+        if d['ca'] > 0:
+            marge = (d['res'] / d['ca']) * 100
+            st.progress(min(max(marge+50, 0), 100)/100, text=f"Marge Nette: {marge:.1f}%")
+        
+        # 3. Onglets
+        tab1, tab2, tab3 = st.tabs(["📄 Rapports", "📈 Bourse", "🌍 Climat"])
+        
+        with tab1:
+            st.success("Documents générés")
+            col_pdf, col_xls = st.columns(2)
+            with col_pdf:
+                pdf_data = create_pdf(d)
+                st.download_button("Télécharger PDF", pdf_data, file_name="Audit_Complet.pdf", mime="application/pdf")
+            with col_xls:
+                xls_data = create_excel(d)
+                st.download_button("Télécharger Excel", xls_data, file_name="Donnees_Audit.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                
+        with tab2:
+            st.write("#### Comparables Sectoriels")
+            if st.session_state.comparables is not None:
+                st.dataframe(st.session_state.comparables, use_container_width=True)
+            else:
+                st.info("Pas de données boursières disponibles.")
+                
+        with tab3:
+            st.write(f"**Vulnérabilité Secteur :** {d['vuln']*100:.0f}%")
+            st.write("Localisation :", d['ville'])
+            # Carte statique simple (simulée ici pour éviter dépendance complexe)
+            st.map(pd.DataFrame({'lat': [48.823], 'lon': [2.269]})) # Issy
+            
+    else:
+        # Message d'accueil si pas encore d'audit
+        st.info("👈 Veuillez entrer les données à gauche et cliquer sur 'LANCER L'AUDIT'.")
+        st.write("Ce dashboard affichera :")
+        st.write("- La valorisation calculée")
+        st.write("- L'impact du risque eau sur le bilan")
+        st.write("- Les comparables boursiers (Danone, Nestlé...)")
         
