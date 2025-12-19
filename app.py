@@ -24,8 +24,8 @@ from staticmap import StaticMap, CircleMarker
 # ==============================================================================
 # 1. CONFIGURATION
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk V18.1 : OCR Expert", page_icon="🤖", layout="wide")
-st.title("🤖 AquaRisk V18.1 : Audit avec Lecture Intelligente de Bilan")
+st.set_page_config(page_title="AquaRisk V18.2 : Stable", page_icon="💎", layout="wide")
+st.title("💎 AquaRisk V18.2 : Audit Financier, Climatique & Documentaire")
 
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 if 'pappers_data' not in st.session_state: st.session_state.pappers_data = None
@@ -38,17 +38,21 @@ if 'pdf_financials' not in st.session_state: st.session_state.pdf_financials = N
 @st.cache_data
 def load_data():
     BACKUP_DATA = pd.DataFrame({
-        'name_0': ['France', 'United States', 'Germany', 'China'],
-        'name_1': ['Ile-de-France', 'California', 'Bavaria', 'Beijing'],
-        'score': [2.5, 3.8, 2.2, 4.1]
+        'name_0': ['France', 'United States', 'Germany', 'China', 'India', 'Brazil', 'United Kingdom'],
+        'name_1': ['Ile-de-France', 'California', 'Bavaria', 'Beijing', 'Maharashtra', 'Sao Paulo', 'London'],
+        'score': [2.5, 3.8, 2.2, 4.1, 4.5, 2.8, 1.9]
     })
     
     def smart_read(filename):
         if not os.path.exists(filename): return None
         try:
-            df = pd.read_csv(filename, sep=',', engine='python', on_bad_lines='skip')
-            df.columns = [c.lower().strip() for c in df.columns]
-            return df
+            for sep in [',', ';', '\t']:
+                try:
+                    df = pd.read_csv(filename, sep=sep, engine='python', on_bad_lines='skip')
+                    df.columns = [c.lower().strip() for c in df.columns]
+                    if 'name_0' in df.columns: return df
+                except: continue
+            return None
         except: return None
 
     df_now = smart_read("risk_actuel.csv")
@@ -71,17 +75,14 @@ try:
 except: st.stop()
 
 # ==============================================================================
-# 3. MOTEUR OCR FINANCIER AVANCÉ (V2)
+# 3. MOTEUR OCR FINANCIER (EXTRACTION PDF)
 # ==============================================================================
 def parse_french_number(text_num):
     """Nettoie et convertit '1 230 500' ou '(10 000)' en float"""
     try:
-        # Nettoyage
         clean = text_num.replace(' ', '').replace(')', '').replace('(', '-')
-        # Gestion des caractères invisibles
         clean = re.sub(r'[^\d,\.-]', '', clean)
         clean = clean.replace(',', '.')
-        # Gestion des multiples points
         if clean.count('.') > 1:
             clean = clean.replace('.', '', clean.count('.') - 1)
         return float(clean)
@@ -89,14 +90,10 @@ def parse_french_number(text_num):
         return None
 
 def extract_financials_from_text(text):
-    """
-    Analyse ligne par ligne pour extraire les données d'une liasse fiscale.
-    Cherche les mots clés et prend le nombre le plus pertinent sur la ligne.
-    """
+    """Analyse ligne par ligne pour extraire les données d'une liasse fiscale."""
     data = {"ca": 0, "resultat": 0, "capitaux": 0, "found": False}
     lines = text.split('\n')
     
-    # Motifs cibles (Ordre de priorité)
     patterns = {
         "ca": ["CHIFFRES D'AFFAIRES NETS", "Total des produits d'exploitation", "Ventes de marchandises"],
         "resultat": ["BENEFICE OU PERTE", "RESULTAT DE L'EXERCICE (bénéfice ou perte)", "RESULTAT DE L'EXERCICE"],
@@ -109,10 +106,8 @@ def extract_financials_from_text(text):
         # 1. Analyse CA
         for p in patterns["ca"]:
             if p in line_clean and data["ca"] == 0:
-                # On cherche tous les nombres sur la ligne
                 nums = re.findall(r'-?[\d\s]+(?:,[\d]+)?', line)
                 valid_nums = [parse_french_number(n) for n in nums if parse_french_number(n) is not None]
-                # Heuristique : Le CA est souvent le plus grand chiffre de la ligne
                 if valid_nums:
                     data["ca"] = max(valid_nums)
                     data["found"] = True
@@ -123,8 +118,7 @@ def extract_financials_from_text(text):
                 nums = re.findall(r'-?[\d\s]+(?:,[\d]+)?', line)
                 valid_nums = [parse_french_number(n) for n in nums if parse_french_number(n) is not None]
                 if valid_nums:
-                    # On prend le dernier chiffre (souvent colonne N) ou le plus grand en valeur absolue
-                    data["resultat"] = valid_nums[0] # Souvent le premier après le libellé dans les PDF extraits
+                    data["resultat"] = valid_nums[0] 
                     data["found"] = True
 
         # 3. Analyse Capitaux
@@ -149,12 +143,12 @@ def get_location_safe(ville, pays):
     fallback = {
         "paris": (48.8566, 2.3522), "lyon": (45.7640, 4.8357), "marseille": (43.2965, 5.3698),
         "bordeaux": (44.8378, -0.5792), "toulouse": (43.6047, 1.4442), "boulogne-billancourt": (48.8397, 2.2399),
-        "issy-les-moulineaux": (48.823, 2.269) # Ajout pour votre cas
+        "issy-les-moulineaux": (48.823, 2.269)
     }
     if clean_v in fallback: return MockLocation(*fallback[clean_v])
     for i in range(2):
         try:
-            ua = f"AR_V181_{randint(1000,9999)}"
+            ua = f"AR_V182_{randint(1000,9999)}"
             loc = Nominatim(user_agent=ua, timeout=8).geocode(f"{ville}, {pays}")
             if loc: return loc
         except: time.sleep(1); continue
@@ -169,7 +163,6 @@ def get_weather_history(lat, lon):
     return "N/A"
 
 def get_pappers_financials(company_name, api_key):
-    # (Code Pappers inchangé et robuste)
     if not api_key: return None
     try:
         clean_key = api_key.strip()
@@ -229,8 +222,7 @@ def extract_text_from_pdfs(files):
     for f in files:
         try:
             with pdfplumber.open(f) as pdf:
-                # On scanne plus de pages pour être sûr de trouver le bilan
-                for p in pdf.pages[:30]: t += p.extract_text() or ""
+                for p in pdf.pages[:20]: t += p.extract_text() or ""
                 n.append(f.name)
         except: continue
     return t, n
@@ -277,7 +269,7 @@ def create_pdf(data, corpus, notes):
     pdf.add_page()
     
     pdf.set_font("Arial", 'B', 20)
-    pdf.cell(0, 15, clean(f"AUDIT V18.1: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
+    pdf.cell(0, 15, clean(f"RAPPORT V18.2: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
     pdf.ln(10)
     
     if data.get('lat'):
@@ -295,9 +287,213 @@ def create_pdf(data, corpus, notes):
     pdf.cell(60, 10, clean(f"Valorisation: {val:,.0f} $"), border=1)
     pdf.cell(60, 10, clean(f"Methode: {data.get('source_ca', 'Manuel')}"), border=1)
     
+    # CORRECTION SYNTAXE ICI
     if var > 0:
-        pdf.set_text_color(200,0,0)
+        pdf.set_text_color(200, 0, 0) # Rouge
         txt_var = f"PERTE Estimee 2030: -{abs(var):,.0f} $"
     elif var < 0:
-        pdf.set_text_color(0,100
-                           
+        pdf.set_text_color(0, 100, 0) # Vert
+        txt_var = f"GAIN / STABILITE: +{abs(var):,.0f} $"
+    else:
+        pdf.set_text_color(0, 0, 0) # Noir
+        txt_var = "Impact Neutre"
+        
+    pdf.cell(60, 10, clean(txt_var), border=1)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(15)
+    
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(0, 10, "2. RISQUE EAU", ln=1)
+    pdf.set_font("Arial", size=11)
+    
+    s24 = data.get('s2024', 2.5); s30 = data.get('s2030', 2.5)
+    pdf.cell(60, 10, f"Score 2024: {s24:.2f}/5", border=1, align='C')
+    pdf.cell(60, 10, f"Proj 2030: {s30:.2f}/5", border=1, align='C')
+    pdf.cell(60, 10, f"Meteo (90j): {data.get('pluie_90j', 'N/A')} mm", border=1, align='C')
+    pdf.ln(10)
+    
+    pdf.set_font("Arial", 'I', 10)
+    pdf.multi_cell(0, 5, clean(f"Synthese IA: {data.get('txt_ia', '')}"))
+    
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(0, 10, "3. SOURCES", ln=1)
+    pdf.set_font("Arial", size=10)
+    
+    if data.get('news'):
+        for n in data['news']:
+            pdf.set_text_color(0,0,255)
+            pdf.cell(0, 6, clean(f">> {n['title']}"), ln=1, link=n['link'])
+            pdf.set_text_color(0,0,0)
+            pdf.multi_cell(0, 5, clean(f"{n['summary']}"))
+            pdf.ln(2)
+            
+    if notes:
+        pdf.ln(5)
+        pdf.set_font("Arial", 'I', 10)
+        pdf.multi_cell(0, 6, clean(f"Notes Analyste: {notes}"))
+        
+    return pdf.output(dest='S').encode('latin-1', 'replace')
+
+# ==============================================================================
+# 7. INTERFACE
+# ==============================================================================
+with st.sidebar:
+    st.header("⚙️ Config")
+    pappers_key = st.text_input("Clé Pappers", type="password")
+
+c1, c2 = st.columns([1, 2])
+
+with c1:
+    st.subheader("1. Cible")
+    ent = st.text_input("Nom", "Michel et Augustin")
+    v = st.text_input("Ville", "Boulogne-Billancourt")
+    p = st.text_input("Pays", "France")
+    website = st.text_input("Web", "")
+    
+    st.markdown("---")
+    st.subheader("2. Finance")
+    mode_val = st.radio("Type", ["Non Cotée", "Cotée", "Startup"])
+    valeur_finale = 0.0; source_info = "Manuel"
+    
+    secteur_risk = st.selectbox("Secteur (Vulnérabilité)", ["Agroalimentaire (100%)", "Industrie (70%)", "BTP (40%)", "Commerce (20%)", "Logiciel (5%)"])
+    vuln_factor = {"Agroalimentaire": 1.0, "Industrie": 0.7, "BTP": 0.4, "Commerce": 0.2, "Logiciel": 0.05}.get(secteur_risk.split()[0], 0.5)
+
+    if mode_val == "Non Cotée":
+        col_api, col_pdf = st.columns(2)
+        with col_api:
+            if st.button("🔍 Pappers"):
+                with st.spinner("API..."):
+                    i = get_pappers_financials(ent, pappers_key)
+                    if i: 
+                        st.session_state.pappers_data = i
+                        st.success("Bilan OK!")
+                    else: st.warning("Pas trouvé.")
+        
+        with col_pdf:
+            st.caption("Ou glissez le Bilan PDF ici 👇")
+            uploaded_bilan = st.file_uploader("Liasse Fiscale (PDF)", type=["pdf"], key="bilan_upload")
+            if uploaded_bilan:
+                with st.spinner("Lecture OCR..."):
+                    txt_bilan, _ = extract_text_from_pdfs([uploaded_bilan])
+                    fin_data = extract_financials_from_text(txt_bilan)
+                    if fin_data['found']:
+                        st.session_state.pdf_financials = fin_data
+                        st.success("Données extraites !")
+        
+        ca_val = 1000000.0; res_val = 100000.0; cap_val = 200000.0
+        
+        if st.session_state.get('pdf_financials') and st.session_state.pdf_financials.get('found'):
+            d = st.session_state.pdf_financials
+            if d['ca'] > 0: ca_val = float(d['ca'])
+            if d['resultat'] != 0: res_val = float(d['resultat'])
+            if d['capitaux'] > 0: cap_val = float(d['capitaux'])
+            st.info(f"Source: PDF (CA: {ca_val:,.0f}€)")
+            
+        elif st.session_state.pappers_data:
+            d = st.session_state.pappers_data
+            if d['ca']: ca_val = float(d['ca'])
+            if d['resultat']: res_val = float(d['resultat'])
+            if d['capitaux']: cap_val = float(d['capitaux'])
+            st.info(f"Source: Pappers (CA: {ca_val:,.0f}€)")
+
+        m_pme = st.selectbox("Méthode", ["Multiple CA", "Multiple EBITDA", "DCF", "Patrimonial"])
+        
+        val_calc = 0.0
+        if "CA" in m_pme:
+            base = st.number_input("Chiffre d'Affaires (€)", value=ca_val)
+            val_calc = base * 1.5
+        elif "EBITDA" in m_pme:
+            ebitda_default = res_val * 1.25 if res_val > 0 else 0
+            base = st.number_input("EBITDA (€)", value=ebitda_default)
+            val_calc = base * 7.0
+        elif "DCF" in m_pme:
+            fcf = st.number_input("Free Cash Flow", value=res_val) 
+            val_calc = fcf * (1.02) / (0.10 - 0.02)
+        else:
+            val_calc = st.number_input("Capitaux Propres", value=cap_val)
+            
+        valeur_finale = st.number_input("Valo Retenue", value=val_calc)
+        source_info = m_pme
+
+    elif mode_val == "Cotée":
+        ticker = st.text_input("Ticker", "BN.PA")
+        ind = st.selectbox("Indicateur", ["Market Cap", "Enterprise Value"])
+        if st.button("Yahoo"):
+            m, e = get_stock_advanced(ticker)
+            if m > 0: st.session_state.stock_data = {"mcap":m, "ev":e}
+        ref = st.session_state.stock_data.get('mcap', 0)
+        valeur_finale = st.number_input("Valo", value=ref if ref > 0 else 1000000.0)
+        source_info = f"Bourse {ticker}"
+
+    else: 
+        stade = st.selectbox("Stade", ["Pre-Seed", "Seed", "Series A", "Series B"])
+        valeur_finale = st.slider("Valo", 1e6, 8e7, 5e6)
+        source_info = f"VC {stade}"
+
+    st.markdown("---")
+    st.write("📂 **3. Data Room**")
+    notes = st.text_area("Notes", height=100)
+    uploaded_docs = st.file_uploader("PDFs (Analyse Risques)", type=["pdf"], accept_multiple_files=True)
+    
+    if st.button("🚀 AUDIT"):
+        with st.spinner("Analyse..."):
+            res = analyser_risque_geo(v, p)
+            if res['found']:
+                news = get_company_news(ent)
+                wiki = get_wiki_summary(ent)
+                web = scan_website(website)
+                pluie = get_weather_history(res['lat'], res['lon'])
+                doc_txt, doc_n = extract_text_from_pdfs(uploaded_docs)
+                
+                corpus = f"{notes} {web} {wiki} {doc_txt} {' '.join([n['title'] for n in news])}"
+                
+                delta_risk = res['s2030'] - res['s2024']
+                impact_30 = valeur_finale * (delta_risk / 5.0) * vuln_factor
+                impact_26 = valeur_finale * ((res['s2026'] - res['s2024']) / 5.0) * vuln_factor
+                
+                alerts = sum(1 for w in ['litige', 'procès', 'amende', 'pollution'] if w in corpus.lower())
+                txt_ia = f"Analyse {len(doc_n)} docs. {alerts} alertes. Contexte: {wiki[:300]}..."
+                
+                final = {
+                    "ent": ent, "ville": v, "pays": res['pays'], 
+                    "lat": res['lat'], "lon": res['lon'],
+                    "valeur_entreprise": valeur_finale, "source_ca": source_info,
+                    "s2024": res['s2024'], "s2026": res['s2026'], "s2030": res['s2030'],
+                    "var_2030": impact_30, "vuln_percent": vuln_factor,
+                    "news": news, "doc_files": doc_n, "txt_ia": txt_ia,
+                    "pluie_90j": pluie, "full_text": corpus
+                }
+                st.session_state.audit_unique = final
+                st.rerun()
+
+with c2:
+    if st.session_state.audit_unique:
+        r = st.session_state.audit_unique
+        st.success(f"Audit : {r.get('ent')}")
+        
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Valo", f"{r.get('valeur_entreprise',0):,.0f} $")
+        
+        delta_r = r.get('s2030',0)-r.get('s2024',0)
+        k2.metric("Trajectoire", f"{r.get('s2030',0):.2f}/5", delta=f"{delta_r:.2f}", delta_color="inverse")
+        
+        var_30 = r.get('var_2030', 0)
+        label_var = f"{var_30:,.0f} $"
+        color_var = "inverse" if var_30 > 0 else "normal"
+        k3.metric("Impact 2030", label_var, delta="VaR", delta_color=color_var)
+        
+        st.info(f"Météo: {r.get('pluie_90j')} mm | Vulnérabilité: {r.get('vuln_percent',0)*100:.0f}%")
+        
+        t1, t2 = st.tabs(["Rapport PDF", "Sources"])
+        with t1:
+            if r.get('full_text'):
+                pdf = create_pdf(r, r['full_text'], notes)
+                st.download_button("📥 Télécharger PDF", pdf, file_name="Rapport.pdf")
+            if r.get('lat'):
+                m = folium.Map([r['lat'], r['lon']], zoom_start=10)
+                folium.Marker([r['lat'], r['lon']], icon=folium.Icon(color='red')).add_to(m)
+                st_folium(m, height=300)
+        with t2:
+            for n in r.get('news', []): st.markdown(f"- [{n['title']}]({n['link']})")
+                
