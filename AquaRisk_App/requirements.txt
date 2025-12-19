@@ -11,3 +11,4 @@ thefuzz
 requests
 beautifulsoup4
 openpyxl
+lxml
