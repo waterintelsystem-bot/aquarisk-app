@@ -8,4 +8,6 @@ streamlit-folium
 feedparser
 xlsxwriter
 thefuzz
-geopy
+requests
+beautifulsoup4
+openpyxl
