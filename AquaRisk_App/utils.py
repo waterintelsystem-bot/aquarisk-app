@@ -1,3 +1,4 @@
+import streamlit as st  # <--- C'EST CETTE LIGNE QUI MANQUAIT EN HAUT
 import pandas as pd
 import re
 import pdfplumber
@@ -26,11 +27,12 @@ def init_session():
         
         # Docs
         'news': [], 'wiki_summary': "Pas de données.",
-        'pappers_token': "", # Stockage temporaire clé
+        'pappers_token': "", 
     }
+    
+    # On vérifie et on initialise si nécessaire
     for k, v in defaults.items():
         if k not in st.session_state:
-            import streamlit as st
             st.session_state[k] = v
 
 # --- CONNECTEUR PAPPERS (Renforcé) ---
@@ -182,7 +184,8 @@ def generate_pdf_report(data):
     
     var = data.get('var_amount', 0)
     txt_var = f"PERTE POTENTIELLE (VaR): -{abs(var):,.0f} EUR" if var > 0 else "Impact Financier: Faible"
-    pdf.set_text_color(200, 0, 0) if var > 0 else pdf.set_text_color(0, 100, 0)
+    if var > 0: pdf.set_text_color(200, 0, 0)
+    else: pdf.set_text_color(0, 100, 0)
     pdf.cell(0, 8, txt_var, ln=1)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(10)
