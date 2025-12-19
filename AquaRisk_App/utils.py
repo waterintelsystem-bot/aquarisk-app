@@ -10,20 +10,28 @@ import feedparser
 import xlsxwriter
 from thefuzz import process
 
-# --- CONSTANTES ---
-SECTEURS = {
-    "Agroalimentaire": 1.0,
-    "Industrie Lourde": 0.8,
-    "Énergie / Pétrole": 0.7,
-    "BTP / Construction": 0.6,
-    "Transport / Logistique": 0.5,
-    "Luxe / Textile": 0.5,
-    "Commerce / Retail": 0.4,
-    "Santé / Pharma": 0.3,
-    "Services / Logiciel": 0.1
-}
+# --- CONSTANTES AVEC % VISIBLES ---
+# On utilise ça pour le menu déroulant
+SECTEURS_LISTE = [
+    "Agroalimentaire (100%)",
+    "Industrie Lourde (80%)",
+    "Énergie / Pétrole (70%)",
+    "BTP / Construction (60%)",
+    "Transport / Logistique (50%)",
+    "Luxe / Textile (50%)",
+    "Commerce / Retail (40%)",
+    "Santé / Pharma (30%)",
+    "Services / Logiciel (10%)"
+]
 
-# --- OCR AGRESSIF (V27 RESTAURE) ---
+def get_vuln_from_sector(sector_str):
+    """Extrait le pourcentage du string 'Agro (100%)' -> 1.0"""
+    try:
+        pct = int(re.findall(r'(\d+)%', sector_str)[0])
+        return pct / 100.0
+    except: return 0.5
+
+# --- OCR AGRESSIF ---
 def clean_number(text_num):
     if not isinstance(text_num, str): return 0.0
     try:
@@ -62,9 +70,8 @@ def run_ocr_scan(file_obj):
     except Exception as e: return stats, str(e)
     return stats, full_text
 
-# --- INTELLIGENCE (WIKI & NEWS) ---
+# --- INTELLIGENCE ---
 def get_company_intelligence(name):
-    # 1. Wikipedia
     wiki_text = "Pas de données Wikipedia."
     try:
         url = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{name}"
@@ -72,7 +79,6 @@ def get_company_intelligence(name):
         if r.status_code == 200: wiki_text = r.json().get('extract', wiki_text)
     except: pass
 
-    # 2. News (Google RSS)
     news_items = []
     try:
         import urllib.parse
@@ -80,87 +86,112 @@ def get_company_intelligence(name):
         f = feedparser.parse(f"https://news.google.com/rss/search?q={q}&hl=fr-FR&gl=FR&ceid=FR:fr")
         news_items = [{"title": e.title, "link": e.link} for e in f.entries[:5]]
     except: pass
-
     return wiki_text, news_items
 
-# --- BOURSE SECURISEE ---
+# --- BOURSE ---
 def get_yahoo_data(ticker):
     try:
         t = yf.Ticker(ticker)
-        # On tente plusieurs accès car l'API change souvent
         mcap = t.info.get('marketCap') or t.fast_info.get('market_cap')
         name = t.info.get('shortName') or t.info.get('longName')
         sector = t.info.get('sector', "Inconnu")
         return (float(mcap), name, sector) if mcap else (0.0, None, None)
     except: return 0.0, None, None
 
-# --- EXCEL EXPORT ---
-def generate_excel(data):
-    output = io.BytesIO()
-    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
-    ws = workbook.add_worksheet("Audit")
-    
-    headers = ["Métrique", "Valeur", "Détail"]
-    rows = [
-        ["Entreprise", data['ent_name'], data['secteur']],
-        ["Valorisation", data['valo_finale'], data['mode_valo']],
-        ["CA", data['ca'], data['source_data']],
-        ["Résultat", data['res'], ""],
-        ["Score Climat 2030", data['s30'], "/ 5.0"],
-        ["Impact VaR", data['var_amount'], "Perte potentielle"]
-    ]
-    
-    for col, h in enumerate(headers): ws.write(0, col, h)
-    for row, record in enumerate(rows):
-        for col, val in enumerate(record):
-            ws.write(row+1, col, val)
-            
-    workbook.close()
-    return output.getvalue()
-
-# --- PDF EXPORT ---
+# --- PDF SOLIDE ---
 def generate_pdf_report(data):
     pdf = FPDF()
     pdf.add_page()
     
-    # En-tête
-    pdf.set_font("Arial", 'B', 20)
-    pdf.cell(0, 15, f"AUDIT: {data.get('ent_name', 'N/A')}", ln=1, align='C')
-    pdf.set_font("Arial", 'I', 10)
-    pdf.cell(0, 10, f"Secteur: {data.get('secteur', '?')} | Date: {datetime.now().strftime('%d/%m/%Y')}", ln=1, align='C')
+    # 1. Couverture
+    pdf.set_font("Arial", 'B', 24)
+    pdf.cell(0, 20, f"RAPPORT D'AUDIT", ln=1, align='C')
+    pdf.set_font("Arial", 'B', 18)
+    pdf.cell(0, 10, f"{str(data.get('ent_name', 'Société Inconnue')).upper()}", ln=1, align='C')
     pdf.ln(10)
     
-    # Résumé IA
-    pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "1. CONTEXTE & SYNTHESE", ln=1)
-    pdf.set_font("Arial", '', 10)
-    txt = data.get('wiki_summary', '')[:1000]
-    try: txt = txt.encode('latin-1', 'replace').decode('latin-1')
-    except: txt = "Erreur encodage."
-    pdf.multi_cell(0, 5, txt)
-    pdf.ln(5)
-
-    # Finance
-    pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "2. FINANCE", ln=1)
-    pdf.set_font("Arial", '', 11)
-    pdf.cell(0, 8, f"Valorisation: {data.get('valo_finale', 0):,.0f} EUR ({data.get('mode_valo')})", ln=1)
-    pdf.cell(0, 8, f"CA: {data.get('ca', 0):,.0f} EUR | Res. Net: {data.get('res', 0):,.0f} EUR", ln=1)
+    pdf.set_font("Arial", 'I', 10)
+    pdf.cell(0, 10, f"Secteur: {str(data.get('secteur', 'Non défini'))} | Date: {datetime.now().strftime('%d/%m/%Y')}", ln=1, align='C')
+    pdf.ln(20)
     
-    # Climat
-    pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "3. CLIMAT & RISQUES", ln=1)
-    pdf.set_font("Arial", '', 11)
-    pdf.cell(0, 8, f"Score Risque 2030: {data.get('s30', 0):.2f} / 5.00", ln=1)
+    # 2. Finance
+    pdf.set_fill_color(200, 220, 255)
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(0, 10, "1. SYNTHESE FINANCIERE", ln=1, fill=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", '', 12)
+    pdf.cell(0, 8, f"Valorisation Retenue: {data.get('valo_finale', 0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Mode: {str(data.get('mode_valo', 'N/A'))} / {str(data.get('source_data', 'Manuel'))}", ln=1)
+    pdf.cell(0, 8, f"Chiffre d'Affaires: {data.get('ca', 0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Resultat Net: {data.get('res', 0):,.0f} EUR", ln=1)
+    pdf.ln(10)
+
+    # 3. Climat & VaR
+    pdf.set_fill_color(255, 200, 200)
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(0, 10, "2. ANALYSE RISQUES & VAR", ln=1, fill=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", '', 12)
+    s30 = data.get('s30', 0)
+    pdf.cell(0, 8, f"Score Risque Eau 2030: {s30:.2f} / 5.00", ln=1)
+    
     var = data.get('var_amount', 0)
-    pdf.cell(0, 8, f"Impact Financier (VaR): -{abs(var):,.0f} EUR", ln=1)
+    if var > 0:
+        pdf.set_text_color(200, 0, 0) # Rouge
+        txt_var = f"PERTE POTENTIELLE (VaR): -{abs(var):,.0f} EUR"
+    else:
+        pdf.set_text_color(0, 100, 0) # Vert
+        txt_var = "IMPACT FINANCIER: Stable / Non significatif"
+        
+    pdf.cell(0, 8, txt_var, ln=1)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(10)
+
+    # 4. Intelligence
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(0, 10, "3. CONTEXTE & INTELLIGENCE", ln=1)
+    pdf.set_font("Arial", '', 10)
+    
+    txt = str(data.get('wiki_summary', 'Pas de résumé.'))[:1500]
+    try: txt = txt.encode('latin-1', 'replace').decode('latin-1')
+    except: txt = "Erreur encodage texte."
+    pdf.multi_cell(0, 5, txt)
     
     # Sources
     pdf.ln(5)
-    pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "4. SOURCES", ln=1)
+    pdf.set_font("Arial", 'B', 11)
+    pdf.cell(0, 10, "Sources Detectees:", ln=1)
     pdf.set_font("Arial", '', 9)
-    for n in data.get('news', []):
-        try:
-            title = n['title'].encode('latin-1', 'replace').decode('latin-1')
-            pdf.cell(0, 5, f"- {title}", ln=1, link=n['link'])
-        except: continue
-            
+    news = data.get('news', [])
+    if news:
+        for n in news:
+            try:
+                t = n['title'].encode('latin-1', 'replace').decode('latin-1')
+                pdf.cell(0, 5, f"- {t}", ln=1, link=n['link'])
+            except: continue
+    else:
+        pdf.cell(0, 5, "Aucune source externe trouvee.", ln=1)
+
     return pdf.output(dest='S').encode('latin-1', 'replace')
+
+def generate_excel(data):
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    ws = workbook.add_worksheet("Audit")
+    headers = ["Metric", "Value", "Detail"]
+    rows = [
+        ["Name", data.get('ent_name'), data.get('secteur')],
+        ["Valuation", data.get('valo_finale'), data.get('mode_valo')],
+        ["Revenue (CA)", data.get('ca'), data.get('source_data')],
+        ["Net Result", data.get('res'), ""],
+        ["Risk Score 2030", data.get('s30'), "/ 5.0"],
+        ["VaR Amount", data.get('var_amount'), "EUR"]
+    ]
+    for col, h in enumerate(headers): ws.write(0, col, h)
+    for row, record in enumerate(rows):
+        for col, val in enumerate(record): ws.write(row+1, col, val)
+    workbook.close()
+    return output.getvalue()
     
