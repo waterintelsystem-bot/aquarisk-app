@@ -1,4 +1,4 @@
-import streamlit as st  # <--- C'EST CETTE LIGNE QUI MANQUAIT EN HAUT
+import streamlit as st
 import pandas as pd
 import re
 import pdfplumber
@@ -9,55 +9,78 @@ import io
 import requests
 import feedparser
 import xlsxwriter
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg') # Pour éviter les erreurs de serveur
 
-# --- INITIALISATION MEMOIRE (A appeler sur chaque page) ---
+# --- INITIALISATION MEMOIRE ---
 def init_session():
     defaults = {
         'ent_name': "Nouvelle Entreprise",
+        'siren': "",
         'ville': "Paris", 'pays': "France",
         'secteur': "Agroalimentaire (100%)",
         
         # Finance
-        'ca': 0.0, 'res': 0.0, 'cap': 0.0,
+        'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'fcf': 0.0,
         'valo_finale': 0.0, 'mode_valo': "PME (Bilan)", 'source_data': "Manuel",
         
         # Climat
         's24': 2.5, 's30': 3.0, 'var_amount': 0.0,
         'lat': 48.8566, 'lon': 2.3522,
+        'climat_calcule': False,
         
         # Docs
         'news': [], 'wiki_summary': "Pas de données.",
-        'pappers_token': "", 
     }
-    
-    # On vérifie et on initialise si nécessaire
     for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+        if k not in st.session_state: st.session_state[k] = v
 
-# --- CONNECTEUR PAPPERS (Renforcé) ---
-def get_pappers_data(name, api_key):
+# --- LISTE SECTEURS ETENDUE ---
+SECTEURS = {
+    "Agroalimentaire (100%)": 1.0,
+    "Mines & Métaux (90%)": 0.9,
+    "Chimie / Pétrochimie (85%)": 0.85,
+    "Industrie Lourde (80%)": 0.8,
+    "Énergie / Pétrole (70%)": 0.7,
+    "Textile / Habillement (65%)": 0.65,
+    "BTP / Construction (60%)": 0.6,
+    "Transport / Logistique (50%)": 0.5,
+    "Tourisme / Hôtellerie (50%)": 0.5,
+    "Commerce / Retail (40%)": 0.4,
+    "Santé / Pharma (30%)": 0.3,
+    "Immobilier (Gestion) (25%)": 0.25,
+    "Télécoms (20%)": 0.2,
+    "Banque / Assurance (15%)": 0.15,
+    "Services / Logiciel (10%)": 0.1,
+    "Consulting / Audit (5%)": 0.05
+}
+SECTEURS_LISTE = list(SECTEURS.keys())
+
+# --- CONNECTEUR PAPPERS (SIREN + NOM) ---
+def get_pappers_data(query, api_key):
     if not api_key: return None, "Clé API manquante."
     try:
-        # 1. Recherche
-        url_search = "https://api.pappers.fr/v2/recherche"
-        params = {"q": name, "api_token": api_key, "par_page": 1}
-        r = requests.get(url_search, params=params, timeout=5)
+        # Détection automatique SIREN (9 chiffres)
+        is_siren = re.fullmatch(r'\d{9}', query.replace(' ', ''))
         
-        if r.status_code == 401: return None, "Clé API invalide."
-        if r.status_code != 200: return None, f"Erreur API: {r.status_code}"
-        
-        data = r.json()
-        if not data.get('resultats'): return None, "Entreprise introuvable."
-        
-        # 2. Données Financières
-        company = data['resultats'][0]
-        siren = company['siren']
-        nom = company['nom_entreprise']
-        
-        r2 = requests.get("https://api.pappers.fr/v2/entreprise", params={"api_token": api_key, "siren": siren}, timeout=5)
-        details = r2.json()
-        
+        if is_siren:
+            url = f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={query.replace(' ', '')}"
+            r = requests.get(url, timeout=5)
+            if r.status_code != 200: return None, "SIREN introuvable."
+            details = r.json()
+            nom = details.get('nom_entreprise', 'Inconnu')
+        else:
+            # Recherche par nom
+            url_search = "https://api.pappers.fr/v2/recherche"
+            r = requests.get(url_search, params={"q": query, "api_token": api_key, "par_page": 1}, timeout=5)
+            data = r.json()
+            if not data.get('resultats'): return None, "Entreprise introuvable."
+            company = data['resultats'][0]
+            nom = company['nom_entreprise']
+            r2 = requests.get(f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={company['siren']}", timeout=5)
+            details = r2.json()
+
         stats = {'ca': 0.0, 'res': 0.0, 'cap': 0.0}
         finances = details.get('finances', [])
         if finances:
@@ -72,27 +95,24 @@ def get_pappers_data(name, api_key):
 # --- CONNECTEUR YAHOO (Renforcé) ---
 def get_yahoo_data(ticker):
     try:
-        # Tente d'ajouter .PA si oublié
-        suffixes = ["", ".PA", ".DE", ".L"]
-        for suf in suffixes:
-            full_ticker = f"{ticker}{suf}" if not ticker.endswith(suf) else ticker
-            t = yf.Ticker(full_ticker)
-            
-            # Méthode Fast Info (Plus rapide/stable)
-            mcap = t.fast_info.get('market_cap')
-            if mcap and mcap > 0:
-                name = t.info.get('shortName') or t.info.get('longName') or full_ticker
-                sector = t.info.get('sector', 'Inconnu')
-                return float(mcap), name, sector, full_ticker
-        
-        return 0.0, None, None, None
+        t = yf.Ticker(ticker)
+        # Tente de récupérer le nom long pour confirmer
+        name = t.info.get('longName')
+        if not name: 
+            # Essai avec .PA si non fourni
+            if not ticker.endswith(".PA"):
+                return get_yahoo_data(ticker + ".PA")
+            return 0.0, None, None, None
+
+        mcap = t.info.get('marketCap') or t.fast_info.get('market_cap')
+        sector = t.info.get('sector', 'Inconnu')
+        return float(mcap), name, sector, ticker
     except: return 0.0, None, None, None
 
-# --- OCR PDF (Nettoyage agressif) ---
+# --- OCR PDF ---
 def clean_number(text_num):
     if not isinstance(text_num, str): return 0.0
     try:
-        # Nettoyage des caractères invisibles et format français
         clean = text_num.replace(' ', '').replace('\xa0', '').replace('€', '')
         clean = clean.replace(')', '').replace('(', '-')
         clean = re.sub(r'[^\d,\.-]', '', clean).replace(',', '.')
@@ -105,11 +125,12 @@ def run_ocr_scan(file_obj):
     try:
         full_text = ""
         with pdfplumber.open(file_obj) as pdf:
-            for p in pdf.pages[:20]: full_text += (p.extract_text() or "") + "\n"
+            for p in pdf.pages[:30]: full_text += (p.extract_text() or "") + "\n"
         
         text_upper = full_text.upper()
+        # Mots clés étendus
         patterns = {
-            'ca': ["CHIFFRES D'AFFAIRES", "PRODUITS D'EXPLOITATION", "VENTES", "TOTAL PRODUITS"],
+            'ca': ["CHIFFRES D'AFFAIRES", "PRODUITS D'EXPLOITATION", "VENTES", "TOTAL DES PRODUITS"],
             'res': ["RESULTAT NET", "BENEFICE OU PERTE", "RESULTAT DE L'EXERCICE"],
             'cap': ["CAPITAUX PROPRES", "SITUATION NETTE", "TOTAL PASSIF"]
         }
@@ -118,15 +139,14 @@ def run_ocr_scan(file_obj):
             for kw in keywords:
                 if kw in text_upper:
                     idx = text_upper.find(kw)
-                    # Fenêtre réduite pour éviter de prendre une date (ex: 2024) comme montant
-                    window = text_upper[idx:idx+300]
+                    window = text_upper[idx:idx+400]
                     nums = re.findall(r'-?\s*(?:\d{1,3}(?:\s\d{3})*|\d+)(?:[\.,]\d+)?', window)
                     
                     valid_nums = []
                     for n in nums:
                         val = clean_number(n)
-                        # On exclut les années probables (1990-2030) sauf si c'est un très petit CA (peu probable)
-                        if abs(val) > 2030 or (abs(val) > 0 and abs(val) < 1900):
+                        # Filtre années et incohérences
+                        if abs(val) > 2050 or (abs(val) > 0 and abs(val) < 1900):
                             valid_nums.append(val)
                     
                     if valid_nums:
@@ -134,63 +154,86 @@ def run_ocr_scan(file_obj):
                         else: stats[key] = valid_nums[0]
                         stats['found'] = True
                         break
-    except Exception as e: return stats, str(e)
-    return stats, "OK"
+    except Exception as e: return stats, f"Erreur technique: {str(e)}"
+    
+    msg = "Données trouvées" if stats['found'] else "Aucun chiffre financier identifié"
+    return stats, msg
 
 # --- INTELLIGENCE (Wiki Fallback) ---
 def get_wiki_summary(name):
+    # Nettoyage du nom pour la recherche (enlève SA, SAS, etc)
+    clean_name = re.sub(r'\s(SA|SAS|SARL|INC|LTD)', '', name, flags=re.IGNORECASE).strip()
     try:
         import urllib.parse
-        # Recherche Wiki générique
-        url = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(name)}"
+        url = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(clean_name)}"
         r = requests.get(url, timeout=3)
         if r.status_code == 200:
             return r.json().get('extract', "Pas de résumé trouvé.")
         return "Page Wikipedia introuvable."
     except: return "Erreur de connexion Wikipedia."
 
-# --- GENERATEUR PDF ---
+# --- GENERATEUR PDF AVEC GRAPHIQUE ---
 def generate_pdf_report(data):
+    # 1. Générer le graphique en image
+    try:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        years = ['2024', '2030']
+        scores = [data.get('s24', 0), data.get('s30', 0)]
+        ax.plot(years, scores, marker='o', color='red', linestyle='-')
+        ax.set_title('Trajectoire Risque Eau')
+        ax.set_ylim(0, 5)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        
+        img_buf = io.BytesIO()
+        plt.savefig(img_buf, format='png', dpi=100)
+        img_buf.seek(0)
+    except: img_buf = None
+
+    # 2. Créer le PDF
     pdf = FPDF()
     pdf.add_page()
     
-    # 1. Header
+    # Header
     pdf.set_font("Arial", 'B', 22)
-    pdf.cell(0, 20, "RAPPORT D'AUDIT COMPLET", ln=1, align='C')
+    pdf.cell(0, 20, "RAPPORT D'AUDIT", ln=1, align='C')
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, f"Societe: {data.get('ent_name', 'Inconnu')}", ln=1, align='C')
+    pdf.cell(0, 10, f"{data.get('ent_name', 'Société').upper()}", ln=1, align='C')
     pdf.ln(10)
     
-    # 2. Finance
-    pdf.set_fill_color(240, 240, 240)
+    # Finance
+    pdf.set_fill_color(230, 230, 230)
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "1. ANALYSE FINANCIERE", ln=1, fill=True)
+    pdf.cell(0, 10, "1. FINANCE & VALORISATION", ln=1, fill=True)
     pdf.set_font("Arial", '', 12)
     pdf.ln(5)
-    pdf.cell(0, 8, f"Valorisation Retenue: {data.get('valo_finale', 0):,.0f} EUR", ln=1)
-    pdf.cell(0, 8, f"Source des donnees: {data.get('source_data', 'Manuel')}", ln=1)
+    pdf.cell(0, 8, f"Valorisation: {data.get('valo_finale', 0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Methode: {data.get('mode_valo', 'Manuel')}", ln=1)
     pdf.cell(0, 8, f"Chiffre d'Affaires: {data.get('ca', 0):,.0f} EUR", ln=1)
-    pdf.cell(0, 8, f"Resultat Net: {data.get('res', 0):,.0f} EUR", ln=1)
     pdf.ln(10)
 
-    # 3. Climat
+    # Climat
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "2. RISQUES CLIMATIQUES & VAR", ln=1, fill=True)
+    pdf.cell(0, 10, "2. RISQUE CLIMATIQUE", ln=1, fill=True)
     pdf.set_font("Arial", '', 12)
     pdf.ln(5)
-    pdf.cell(0, 8, f"Localisation: {data.get('ville', '?')} ({data.get('pays', '?')})", ln=1)
-    pdf.cell(0, 8, f"Score Risque Eau 2030: {data.get('s30', 0):.2f} / 5.00", ln=1)
-    pdf.cell(0, 8, f"Secteur Vulnérable: {data.get('secteur', '?')}", ln=1)
+    pdf.cell(0, 8, f"Localisation: {data.get('ville', '?')}", ln=1)
+    pdf.cell(0, 8, f"Secteur: {data.get('secteur', '?')}", ln=1)
     
     var = data.get('var_amount', 0)
-    txt_var = f"PERTE POTENTIELLE (VaR): -{abs(var):,.0f} EUR" if var > 0 else "Impact Financier: Faible"
+    txt_var = f"IMPACT FINANCIER (VaR): -{abs(var):,.0f} EUR" if var > 0 else "Impact: Faible"
     if var > 0: pdf.set_text_color(200, 0, 0)
-    else: pdf.set_text_color(0, 100, 0)
     pdf.cell(0, 8, txt_var, ln=1)
     pdf.set_text_color(0, 0, 0)
-    pdf.ln(10)
+    
+    # Insertion Graphique
+    if img_buf:
+        pdf.ln(5)
+        # x, y, w, h
+        pdf.image(img_buf, x=50, w=100)
+        pdf.ln(5)
 
-    # 4. Contexte
+    # Contexte
+    pdf.ln(10)
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, "3. CONTEXTE & SOURCES", ln=1, fill=True)
     pdf.set_font("Arial", '', 10)
@@ -202,7 +245,7 @@ def generate_pdf_report(data):
     pdf.multi_cell(0, 5, f"Resume:\n{wiki}")
     pdf.ln(5)
     
-    pdf.cell(0, 10, "Sources Presse:", ln=1)
+    pdf.cell(0, 10, "Sources Web:", ln=1)
     for n in data.get('news', []):
         try:
             t = n['title'].encode('latin-1', 'replace').decode('latin-1')
@@ -219,8 +262,6 @@ def generate_excel(data):
         ["Entité", data.get('ent_name')],
         ["Valo", data.get('valo_finale')],
         ["CA", data.get('ca')],
-        ["Résultat", data.get('res')],
-        ["Risque 2030", data.get('s30')],
         ["VaR", data.get('var_amount')]
     ]
     for i, r in enumerate(rows): ws.write_row(i, 0, r)
