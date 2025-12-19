@@ -17,13 +17,13 @@ from thefuzz import process
 from datetime import datetime, timedelta
 from staticmap import StaticMap, CircleMarker
 import xlsxwriter
-import feedparser # Assurez-vous d'avoir feedparser dans requirements.txt
+import feedparser
 
 # ==============================================================================
 # 1. CONFIGURATION
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk V24.1 : Stable", page_icon="🛡️", layout="wide")
-st.title("🛡️ AquaRisk V24.1 : Audit Complet & Sécurisé")
+st.set_page_config(page_title="AquaRisk V25 : Version Finale", page_icon="💎", layout="wide")
+st.title("💎 AquaRisk V25 : L'Audit Ultime (Restored Features)")
 
 # Gestionnaire de Session Robuste
 defaults = {
@@ -36,25 +36,7 @@ for k, v in defaults.items():
     if k not in st.session_state: st.session_state[k] = v
 
 # ==============================================================================
-# 2. CHARGEMENT DATA
-# ==============================================================================
-@st.cache_data
-def load_data_safe():
-    df_def = pd.DataFrame({'name_0': ['France', 'United States'], 'score': [2.5, 3.8]})
-    df_now, df_fut = df_def.copy(), df_def.copy()
-    try:
-        if os.path.exists("risk_actuel.csv"): df_now = pd.read_csv("risk_actuel.csv", on_bad_lines='skip')
-        if os.path.exists("risk_futur.csv"): df_fut = pd.read_csv("risk_futur.csv", on_bad_lines='skip')
-        for df in [df_now, df_fut]:
-            df.columns = [c.lower().strip() for c in df.columns]
-            if 'score' in df.columns: df['score'] = pd.to_numeric(df['score'].astype(str).str.replace(',', '.'), errors='coerce')
-    except: pass
-    return df_now, df_fut
-
-df_actuel, df_futur = load_data_safe()
-
-# ==============================================================================
-# 3. MOTEUR INTELLIGENCE & OCR
+# 2. MOTEUR OCR & INTELLIGENCE
 # ==============================================================================
 def clean_number(text_num):
     try:
@@ -122,6 +104,14 @@ def get_weather_history(lat, lon):
     except: pass
     return "N/A"
 
+def get_stock_advanced(ticker):
+    try:
+        s = yf.Ticker(ticker)
+        m = s.fast_info.get('market_cap')
+        if not m: m = s.info.get('marketCap', 0)
+        return m
+    except: return 0
+
 # ==============================================================================
 # 4. GENERATEUR DE RAPPORT PDF SECURISE
 # ==============================================================================
@@ -140,22 +130,18 @@ def create_pdf_expert(data):
     pdf.cell(0, 10, "1. SYNTHESE EXECUTIVE", ln=1)
     pdf.set_font("Arial", '', 11)
     
-    # Sécurisation du texte
     txt = data.get('txt_ia', 'Analyse en cours...')
-    try:
-        txt = txt.encode('latin-1', 'replace').decode('latin-1')
-    except: 
-        txt = "Texte non encodable."
+    try: txt = txt.encode('latin-1', 'replace').decode('latin-1')
+    except: txt = "Texte non encodable."
         
     pdf.multi_cell(0, 6, txt)
     pdf.ln(10)
     
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "2. CHIFFRES CLES", ln=1)
+    pdf.cell(0, 10, "2. DONNEES FINANCIERES", ln=1)
     pdf.set_font("Arial", '', 11)
     pdf.cell(60, 10, f"Valorisation: {data.get('valo',0):,.0f} EUR", border=1)
-    pdf.cell(60, 10, f"Chiffre d'Affaires: {data.get('ca',0):,.0f} EUR", border=1)
-    pdf.cell(60, 10, f"Resultat Net: {data.get('res',0):,.0f} EUR", border=1)
+    pdf.cell(60, 10, f"Source: {data.get('source_ca', 'Manuel')}", border=1)
     pdf.ln(15)
 
     # --- PAGE 2 ---
@@ -170,12 +156,10 @@ def create_pdf_expert(data):
     pdf.ln(5)
     
     var = data.get('var', 0)
-    if var > 0:
-        pdf.set_text_color(200, 0, 0)
-        pdf.cell(0, 10, f"IMPACT FINANCIER (VAR 2030): -{abs(var):,.0f} EUR", ln=1)
-    else:
-        pdf.set_text_color(0, 100, 0)
-        pdf.cell(0, 10, f"IMPACT FINANCIER (VAR 2030): +{abs(var):,.0f} EUR (Gain)", ln=1)
+    color = (200, 0, 0) if var > 0 else (0, 100, 0)
+    pdf.set_text_color(*color)
+    sign = "-" if var > 0 else "+"
+    pdf.cell(0, 10, f"IMPACT FINANCIER (VAR 2030): {sign}{abs(var):,.0f} EUR", ln=1)
     pdf.set_text_color(0, 0, 0)
     
     # --- PAGE 3 ---
@@ -187,17 +171,13 @@ def create_pdf_expert(data):
     pdf.cell(0, 10, "Presse", ln=1)
     pdf.set_font("Arial", '', 10)
     
-    news = data.get('news', [])
-    if news:
-        for n in news:
-            try:
-                title = n['title'].encode('latin-1', 'replace').decode('latin-1')
-                pdf.set_text_color(0, 0, 255)
-                pdf.cell(0, 6, f">> {title}", ln=1, link=n['link'])
-            except: continue
-        pdf.set_text_color(0, 0, 0)
-    else:
-        pdf.cell(0, 6, "Pas d'articles trouvés.", ln=1)
+    for n in data.get('news', []):
+        try:
+            title = n['title'].encode('latin-1', 'replace').decode('latin-1')
+            pdf.set_text_color(0, 0, 255)
+            pdf.cell(0, 6, f">> {title}", ln=1, link=n['link'])
+        except: continue
+    pdf.set_text_color(0, 0, 0)
         
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
@@ -220,33 +200,76 @@ with col_left:
     pays = st.text_input("Pays", "France")
     
     st.markdown("---")
-    st.subheader("2. Données")
+    st.subheader("2. Mode Valorisation")
     
-    uploaded_pdf = st.file_uploader("Liasse Fiscale (PDF)", type=["pdf"])
-    if uploaded_pdf:
-        txt = read_pdf(uploaded_pdf)
-        fin = extract_financials_smart(txt)
-        if fin['found']:
-            st.session_state.finance_ca = fin['ca']
-            st.session_state.finance_res = fin['res']
-            st.session_state.finance_cap = fin['cap']
-            st.success(f"✅ PDF Lu ! CA: {fin['ca']:,.0f}€")
-    
-    ca = st.number_input("Chiffre d'Affaires (€)", key="finance_ca")
-    res = st.number_input("Résultat Net (€)", key="finance_res")
-    cap = st.number_input("Capitaux Propres (€)", key="finance_cap")
-    
-    methode = st.selectbox("Méthode Valo", ["Multiple CA", "Multiple EBITDA", "DCF"])
-    if methode == "Multiple CA":
-        mult = st.slider("Multiple", 0.5, 5.0, 1.5)
-        val_finale = ca * mult
-    elif methode == "Multiple EBITDA":
-        ebitda = res * 1.25 
-        mult = st.slider("Multiple", 2.0, 15.0, 7.0)
-        val_finale = ebitda * mult
-    else:
-        val_finale = res * 10
+    # --- LE RETOUR DU MENU DE CHOIX ---
+    mode_val = st.radio("Sélectionnez le type d'entreprise :", ["Non Cotée (PME/ETI)", "Cotée (Bourse)", "Startup (VC)"])
+    val_finale = 0.0
+    source_info = "Manuel"
+
+    # ------------------ MODE PME (NON COTEE) ------------------
+    if mode_val == "Non Cotée (PME/ETI)":
+        uploaded_pdf = st.file_uploader("Liasse Fiscale (PDF)", type=["pdf"])
+        if uploaded_pdf:
+            txt = read_pdf(uploaded_pdf)
+            fin = extract_financials_smart(txt)
+            if fin['found']:
+                st.session_state.finance_ca = fin['ca']
+                st.session_state.finance_res = fin['res']
+                st.session_state.finance_cap = fin['cap']
+                st.success(f"✅ PDF Lu ! CA: {fin['ca']:,.0f}€")
         
+        ca = st.number_input("Chiffre d'Affaires (€)", key="finance_ca")
+        res = st.number_input("Résultat Net (€)", key="finance_res")
+        cap = st.number_input("Capitaux Propres (€)", key="finance_cap")
+        
+        methode = st.selectbox("Méthode Valo", ["Multiple CA", "Multiple EBITDA", "DCF"])
+        
+        if methode == "Multiple CA":
+            mult = st.slider("Multiple", 0.5, 5.0, 1.5)
+            val_finale = ca * mult
+            source_info = f"CA x{mult}"
+        elif methode == "Multiple EBITDA":
+            ebitda = res * 1.25 # Approx
+            mult = st.slider("Multiple", 2.0, 15.0, 7.0)
+            val_finale = ebitda * mult
+            source_info = f"EBITDA x{mult}"
+        else: # DCF
+            val_finale = res * 10
+            source_info = "DCF Simplifié"
+
+    # ------------------ MODE BOURSE (COTEE) ------------------
+    elif mode_val == "Cotée (Bourse)":
+        ticker = st.text_input("Ticker Yahoo Finance", "BN.PA")
+        if st.button("Charger Cours"):
+            mcap = get_stock_advanced(ticker)
+            if mcap > 0:
+                st.session_state.stock_data['mcap'] = mcap
+                st.success(f"Market Cap trouvée : {mcap:,.0f} €")
+            else:
+                st.error("Ticker introuvable.")
+        
+        val_finale = st.number_input("Capitalisation Boursière (€)", value=float(st.session_state.stock_data['mcap']))
+        source_info = f"Bourse ({ticker})"
+        # Valeurs par défaut pour les ratios si non trouvées
+        ca = val_finale * 0.5 
+        res = val_finale * 0.05
+        cap = val_finale * 0.3
+
+    # ------------------ MODE STARTUP (VC) ------------------
+    else:
+        stade = st.selectbox("Stade de Maturité", ["Seed (2-8M)", "Series A (8-30M)", "Series B (30-80M)"])
+        ranges = {"Seed": (2e6, 8e6), "Series A": (8e6, 30e6), "Series B": (30e6, 80e6)}
+        mini, maxi = ranges.get(stade.split()[0], (1e6, 5e6))
+        val_finale = st.slider("Valorisation (€)", mini, maxi, (mini+maxi)/2)
+        source_info = f"Venture Capital ({stade})"
+        # Startups font peu de CA/Res
+        ca = val_finale * 0.1
+        res = -val_finale * 0.2
+        cap = val_finale * 0.2
+
+    # --- CLIMAT ---
+    st.markdown("---")
     secteur = st.selectbox("Secteur", ["Agroalimentaire (100%)", "Industrie (70%)", "Tech (5%)"])
     vuln = float(re.findall(r'\d+', secteur)[0])/100
 
@@ -258,11 +281,12 @@ with col_left:
             s24 = 2.5; s30 = s24 * 1.1
             var_amount = val_finale * (s30 - s24) * vuln
             
-            txt_ia = f"Rapport généré pour {ent_name}.\n\nCONTEXTE :\n{wiki}\n\nANALYSE FINANCIERE :\nValorisation estimée à {val_finale:,.0f} EUR (Méthode {methode}).\nCA: {ca:,.0f} EUR | Résultat: {res:,.0f} EUR."
+            txt_ia = f"Rapport généré pour {ent_name}.\n\nCONTEXTE :\n{wiki}\n\nANALYSE FINANCIERE :\nValorisation retenue : {val_finale:,.0f} EUR ({source_info}).\nDonnées clés : CA {ca:,.0f} EUR | Résultat {res:,.0f} EUR."
             
             st.session_state.audit_data = {
                 "ent": ent_name, "ville": ville, "pays": pays,
-                "valo": val_finale, "ca": ca, "res": res, "cap": cap,
+                "valo": val_finale, "source_ca": source_info,
+                "ca": ca, "res": res, "cap": cap,
                 "s30": s30, "var": var_amount, "vuln": vuln, "pluie_90j": pluie,
                 "news": news, "txt_ia": txt_ia
             }
@@ -276,20 +300,19 @@ with col_right:
         d = st.session_state.audit_data
         
         c1, c2 = st.columns(2)
-        c1.metric("Valorisation", f"{d.get('valo', 0):,.0f} €")
+        c1.metric("Valorisation", f"{d.get('valo', 0):,.0f} €", delta=d.get('source_ca'))
         c2.metric("Impact Climat 2030", f"{d.get('var', 0):,.0f} €", delta_color="inverse")
         
-        # UTILISATION SÉCURISÉE DE .GET() POUR ÉVITER LE KEYERROR
         summary = d.get('txt_ia', "Analyse en cours...")
         st.info(f"Résumé : {summary[:300]}...")
         
         st.write("### 📥 Téléchargements")
         pdf_bytes = create_pdf_expert(d)
-        st.download_button("📄 Télécharger le Rapport Complet (PDF)", pdf_bytes, file_name="Audit_Expert_V24.pdf", mime="application/pdf")
+        st.download_button("📄 Télécharger le Rapport Complet (PDF)", pdf_bytes, file_name="Audit_Expert_V25.pdf", mime="application/pdf")
         
         with st.expander("Voir les Sources"):
             for n in d.get('news', []): st.write(f"- [{n['title']}]({n['link']})")
             
     else:
-        st.info("👈 Remplissez les données à gauche et lancez l'audit.")
+        st.info("👈 Configurez l'entreprise à gauche et lancez l'audit.")
         
