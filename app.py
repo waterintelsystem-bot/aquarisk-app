@@ -24,17 +24,16 @@ from staticmap import StaticMap, CircleMarker
 # ==============================================================================
 # 1. CONFIGURATION & STATE
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk 15.1 : Stable", page_icon="🛡️", layout="wide")
-st.title("🛡️ AquaRisk 15.1 : Audit Blindé & Valorisation")
+st.set_page_config(page_title="AquaRisk V15.2 : Pappers Fix", page_icon="🔧", layout="wide")
+st.title("🔧 AquaRisk V15.2 : Audit Financier, Climatique & Pappers Debug")
 
-# Initialisation sécurisée
-if 'audit_unique' not in st.session_state: st.session_state.audit_unique = {}
+if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 if 'pappers_data' not in st.session_state: st.session_state.pappers_data = None
 if 'live_multiples' not in st.session_state: st.session_state.live_multiples = None
 if 'stock_data' not in st.session_state: st.session_state.stock_data = {"mcap": 0, "ev": 0}
 
 # ==============================================================================
-# 2. CHARGEMENT DATA
+# 2. CHARGEMENT DATA (RISQUE EAU)
 # ==============================================================================
 @st.cache_data
 def load_data():
@@ -66,46 +65,88 @@ try:
 except: st.stop()
 
 # ==============================================================================
-# 3. OUTILS API (ROBUSTES)
+# 3. OUTILS API (PAPPERS CORRIGÉ)
 # ==============================================================================
 
-# --- PAPPERS (SECURISE) ---
+# --- PAPPERS (VERSION DEBUG & ROBUSTE) ---
 def get_pappers_financials(company_name, api_key):
-    if not api_key: return None
+    if not api_key: 
+        st.warning("⚠️ Veuillez entrer une clé API Pappers.")
+        return None
+    
+    clean_key = api_key.strip() # Supprime les espaces accidentels
+    
     try:
-        q = urllib.parse.quote(company_name)
-        s_url = f"https://api.pappers.fr/v2/recherche?q={q}&api_token={api_key}&par_page=1"
-        r = requests.get(s_url, timeout=5)
+        # ÉTAPE 1 : RECHERCHE DE L'ENTREPRISE
+        search_url = "https://api.pappers.fr/v2/recherche"
+        params = {
+            "q": company_name,
+            "api_token": clean_key,
+            "par_page": 1,
+            "bases": "entreprises" # On ne cherche que les entreprises actives
+        }
         
-        if r.status_code != 200: return None # Erreur clé ou quota
+        r = requests.get(search_url, params=params, timeout=10)
         
+        # Gestion précise des erreurs HTTP
+        if r.status_code == 401:
+            st.error("⛔ Erreur 401 : Clé API Pappers invalide ou expirée.")
+            return None
+        if r.status_code == 403:
+            st.error("⛔ Erreur 403 : Accès refusé (Abonnement insuffisant ?).")
+            return None
+        if r.status_code != 200:
+            st.error(f"❌ Erreur connexion Pappers (Code: {r.status_code})")
+            return None
+            
         data = r.json()
-        if not data.get('resultats'): return None
+        if not data.get('resultats'):
+            st.warning(f"🤷 Aucune entreprise trouvée pour '{company_name}'.")
+            return None
         
         match = data['resultats'][0]
         siren = match['siren']
+        nom_trouve = match['nom_entreprise']
+        st.caption(f"✅ Pappers a trouvé : {nom_trouve} (SIREN: {siren})")
         
-        f_url = f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={siren}"
-        f_r = requests.get(f_url, timeout=5)
-        if f_r.status_code != 200: return None
+        # ÉTAPE 2 : RÉCUPÉRATION DU BILAN
+        f_url = f"https://api.pappers.fr/v2/entreprise"
+        f_params = {"api_token": clean_key, "siren": siren}
+        
+        f_r = requests.get(f_url, params=f_params, timeout=10)
+        
+        if f_r.status_code != 200:
+            st.warning("Entreprise trouvée, mais impossible de lire les finances.")
+            return None
         
         f_data = f_r.json()
         
         ca=0; res=0; cap=0; ebitda=0; annee="N/A"
-        for c in f_data.get('finances', []):
+        
+        # On cherche le dernier bilan complet
+        finances = f_data.get('finances', [])
+        if not finances:
+            st.warning("⚠️ Aucun bilan public disponible pour cette entreprise.")
+            # On renvoie quand même le nom pour prouver que ça marche
+            return {"nom": nom_trouve, "siren": siren, "annee": "Non Public", "ca": 0, "resultat": 0, "capitaux": 0, "ebitda": 0}
+
+        for c in finances:
             if c.get('annee_cloture_exercice'):
                 ca = c.get('chiffre_affaires', 0) or 0
                 res = c.get('resultat', 0) or 0
                 cap = c.get('capitaux_propres', 0) or 0
+                # Approximation EBITDA
                 ebitda = res * 1.25 if res > 0 else 0 
                 annee = c['annee_cloture_exercice']
                 break
                 
         return {
-            "nom": match['nom_entreprise'], "siren": siren, "annee": annee,
+            "nom": nom_trouve, "siren": siren, "annee": annee,
             "ca": ca, "resultat": res, "capitaux": cap, "ebitda": ebitda
         }
-    except: return None
+    except Exception as e:
+        st.error(f"Erreur technique Pappers : {e}")
+        return None
 
 # --- YAHOO FINANCE ---
 def get_stock_advanced(ticker):
@@ -134,12 +175,12 @@ def get_location_safe(ville, pays):
 
     for i in range(2): 
         try:
-            ua = f"AR_V151_{randint(1000,9999)}"
+            ua = f"AR_V152_{randint(1000,9999)}"
             geolocator = Nominatim(user_agent=ua, timeout=8)
             loc = geolocator.geocode(f"{ville}, {pays}", language='en')
             if loc: return loc
         except: time.sleep(1); continue
-    return MockLocation(48.8566, 2.3522) # Default Paris
+    return MockLocation(48.8566, 2.3522) 
 
 # --- MÉTÉO ---
 def get_weather_history(lat, lon):
@@ -158,7 +199,7 @@ def get_weather_history(lat, lon):
 
 # --- NEWS & WEB ---
 def get_company_news(company_name):
-    q = urllib.parse.quote(f'"{company_name}" (eau OR pollution OR environnement)')
+    q = urllib.parse.quote(f'"{company_name}" (eau OR pollution OR sécheresse OR environnement)')
     rss_url = f"https://news.google.com/rss/search?q={q}&hl=fr-FR&gl=FR&ceid=FR:fr"
     try:
         feed = feedparser.parse(rss_url)
@@ -225,7 +266,7 @@ def analyser_risque_geo(ville, pays):
     }
 
 # ==============================================================================
-# 5. PDF GENERATOR (SECURISE)
+# 5. PDF GENERATOR
 # ==============================================================================
 def generer_image_carte(lat, lon):
     try:
@@ -244,10 +285,9 @@ def create_pdf(data, corpus_text, notes):
     
     pdf.add_page()
     pdf.set_font("Arial", 'B', 20)
-    pdf.cell(0, 15, clean(f"RAPPORT V15.1: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
+    pdf.cell(0, 15, clean(f"RAPPORT V15.2: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
     pdf.ln(10)
     
-    # Carte avec Fallback
     if data.get('lat'):
         map_file = generer_image_carte(data['lat'], data['lon'])
         if map_file and os.path.exists(map_file):
@@ -328,7 +368,6 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔄 Live Market")
     if st.button("Actualiser Taux Bourse"):
-        # Simulation robuste pour éviter les erreurs si Yahoo change son API
         st.session_state.live_multiples = {
             "Logiciel": {"ca": 5.5, "ebitda": 18.0},
             "Industrie": {"ca": 0.8, "ebitda": 7.0},
@@ -368,14 +407,14 @@ with c1:
     
     # --- LOGIQUE NON COTÉE ---
     if "Non Cotée" in mode_val:
+        # BOUTON PAPPERS BLINDÉ
         if st.button("🔍 Récupérer Bilan (Pappers)"):
             with st.spinner("Connexion API..."):
                 i = get_pappers_financials(ent, pappers_key)
                 if i: 
                     st.session_state.pappers_data = i
                     st.success(f"Bilan {i['annee']} trouvé !")
-                else:
-                    st.warning("Entreprise introuvable ou Clé invalide. Entrée manuelle requise.")
+                # Pas de else bloquant ici, les messages d'erreur sont dans la fonction
         
         ca_val = 1000000.0; res_val = 100000.0; cap_val = 200000.0
         if st.session_state.pappers_data:
@@ -411,7 +450,7 @@ with c1:
             val_calc = st.number_input("Capitaux Propres", value=cap_val)
             source_info = "Actif Net"
 
-        st.success(f"Valo Calculée : {val_calc:,.0f} €")
+        st.success(f"Valorisation Calculée : {val_calc:,.0f} €")
         valeur_finale = st.number_input("Valo Retenue", value=val_calc)
 
     # --- LOGIQUE COTÉE ---
@@ -440,28 +479,34 @@ with c1:
     
     if st.button("🚀 LANCER L'AUDIT FINAL"):
         with st.spinner("Analyse Croisée en cours..."):
+            # 1. Analyse Geo & Climat
             res_geo = analyser_risque_geo(v, p)
             
             if res_geo['found']:
+                # 2. Collecte Intelligence
                 news = get_company_news(ent)
                 wiki = get_wiki_summary(ent)
                 web = scan_website(website)
                 pluie = get_weather_history(res_geo['lat'], res_geo['lon'])
                 doc_text, doc_names = extract_text_from_pdfs(uploaded_docs)
                 
+                # 3. Synthèse IA & Texte
                 corpus = f"{notes_manuelles} {web} {wiki} {doc_text} {' '.join([n['title'] for n in news])}"
                 
+                # Calcul VaR Financière
                 risk_delta_26 = max(0, res_geo['s2026'] - 1.5)
                 risk_delta_30 = max(0, res_geo['s2030'] - 1.5)
                 
                 impact_26 = valeur_finale * (risk_delta_26 / 5.0) * vuln_factor
                 impact_30 = valeur_finale * (risk_delta_30 / 5.0) * vuln_factor
                 
+                # Génération du résumé
                 risk_words = sum(1 for w in ['procès', 'litige', 'amende', 'pollution'] if w in corpus.lower())
                 txt_ia = f"Analyse basée sur {len(doc_names)} documents et le web. "
                 if risk_words > 0: txt_ia += f"ATTENTION: {risk_words} alertes détectées."
                 else: txt_ia += "Aucune alerte majeure détectée."
                 
+                # Stockage Résultat
                 final_res = {
                     "ent": ent, "ville": v, "pays": res_geo['pays'],
                     "lat": res_geo['lat'], "lon": res_geo['lon'],
@@ -475,7 +520,7 @@ with c1:
                 st.session_state.audit_unique = final_res
                 st.rerun()
 
-# --- COLONNE DROITE ---
+# --- COLONNE DROITE : RÉSULTATS ---
 with c2:
     if st.session_state.audit_unique and isinstance(st.session_state.audit_unique, dict):
         r = st.session_state.audit_unique
