@@ -15,6 +15,7 @@ import tempfile
 import os
 import random
 import urllib.parse
+from staticmap import StaticMap, CircleMarker # NOUVEAU POUR LE PDF
 
 matplotlib.use('Agg')
 
@@ -25,25 +26,20 @@ def init_session():
         'siren': "",
         'ville': "Paris", 'pays': "France",
         'secteur': "Agroalimentaire (100%)",
-        # Finance
         'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'fcf': 0.0,
         'valo_finale': 0.0, 'mode_valo': "PME (Bilan)", 'source_data': "Manuel",
-        # Climat
         's24': 2.5, 's30': 3.0, 'var_amount': 0.0,
         'lat': 48.8566, 'lon': 2.3522,
         'climat_calcule': False,
-        'map_id': 0, # IMPORTANT POUR LE GPS
-        # Risques 360
+        'map_id': 0,
         'vol_eau': 50000.0, 'prix_eau': 4.5,
         'part_fournisseur_risk': 30.0, 'energie_conso': 100000.0,
         'reut_invest': False,
-        # Docs
         'news': [], 'wiki_summary': "Pas de données.",
     }
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
 
-# --- SECTEURS & PARAMETRES ---
 SECTEURS = {
     "Agroalimentaire (100%)": 1.0, "Mines & Métaux (90%)": 0.9,
     "Chimie (85%)": 0.85, "Industrie (80%)": 0.8,
@@ -54,9 +50,8 @@ SECTEURS = {
 SECTEURS_LISTE = list(SECTEURS.keys())
 HEADERS = {'User-Agent': 'AquaRisk/1.0'}
 
-# --- CALCUL CLIMAT DYNAMIQUE ---
+# --- CALCULS ---
 def calculate_dynamic_score(lat, lon):
-    # Score basé sur la latitude + variation pseudo-aléatoire stable
     base = 2.0 + (abs(lat) / 60.0)
     random.seed(int(lat*100) + int(lon*100))
     noise = random.uniform(-0.3, 0.8)
@@ -64,30 +59,20 @@ def calculate_dynamic_score(lat, lon):
     s30 = min(s24 * 1.2, 5.0)
     return s24, s30
 
-# --- CALCUL RISQUES 360 ---
 def calculate_360_risks(data, params):
     risks = {}
-    # 1. Opérationnel
     delta_prix = data['prix_eau'] * (params['hausse_eau_pct'] / 100.0)
-    risks['Coût Eau (Opérationnel)'] = data['vol_eau'] * delta_prix
-    # 2. Supply Chain
+    risks['Coût Eau'] = data['vol_eau'] * delta_prix
     achats = data['ca'] * 0.40 
     part_exposee = achats * (data['part_fournisseur_risk'] / 100.0)
-    risks['Supply Chain (Rupture)'] = part_exposee * (params['impact_geopolitique'] / 100.0)
-    # 3. Réglementaire
+    risks['Supply Chain'] = part_exposee * (params['impact_geopolitique'] / 100.0)
     if not data['reut_invest']:
         vol_jour = data['vol_eau'] / 300
-        capex_reut = vol_jour * 1500 
-        risks['Réglementaire (Mise aux normes)'] = capex_reut * (params['pression_legale'] / 100.0)
-    else:
-        risks['Réglementaire (Mise aux normes)'] = 0.0
-    # 4. Image
-    risks['Réputation (Boycott)'] = data['valo_finale'] * (params['risque_image'] / 100.0)
-    # 5. Énergie
-    risks['Surcoût Énergie'] = (data['energie_conso'] * 0.15) * (params['hausse_energie'] / 100.0)
-
-    total_risk = sum(risks.values())
-    return risks, total_risk
+        risks['Réglementaire'] = (vol_jour * 1500) * (params['pression_legale'] / 100.0)
+    else: risks['Réglementaire'] = 0.0
+    risks['Réputation'] = data['valo_finale'] * (params['risque_image'] / 100.0)
+    risks['Énergie'] = (data['energie_conso'] * 0.15) * (params['hausse_energie'] / 100.0)
+    return risks, sum(risks.values())
 
 def calculate_water_footprint(data):
     return data['vol_eau'] + (data['ca'] * 0.02)
@@ -123,7 +108,6 @@ def get_yahoo_data(ticker):
         return float(mcap or 0), name, sector, ticker
     except: return 0.0, None, None, None
 
-# --- OCR ---
 def run_ocr_scan(file_obj):
     stats = {'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'found': False}
     try:
@@ -146,10 +130,8 @@ def run_ocr_scan(file_obj):
     except: pass
     return stats, "OK" if stats['found'] else "Rien trouvé"
 
-# --- WIKI (CORRIGÉ) ---
 def get_wiki_summary(name):
     try:
-        # CORRECTION ICI : flags=re.IGNORECASE pour éviter l'AttributeError
         clean = re.sub(r'\s(SA|SAS|SARL|INC)', '', name, flags=re.IGNORECASE).strip()
         search = requests.get("https://fr.wikipedia.org/w/api.php", params={"action":"query","list":"search","srsearch":clean,"format":"json"}, headers=HEADERS, timeout=5).json()
         if not search.get('query',{}).get('search'): return "Pas de page Wiki."
@@ -158,43 +140,83 @@ def get_wiki_summary(name):
         return r.json().get('extract', "Pas de résumé.")
     except: return "Erreur Wiki."
 
-# --- PDF GENERATOR (SECURISE) ---
-def generate_pdf_report(data):
-    # Image
-    temp_path = None
+# --- NOUVEAU : GENERATEUR IMAGE CARTE STATIQUE ---
+def create_static_map_image(lat, lon):
     try:
-        fig, ax = plt.subplots(figsize=(6, 3))
-        ax.plot(['2024', '2030'], [data.get('s24', 2.5), data.get('s30', 3.0)], 'r-o', lw=2)
-        ax.set_title("Risque Eau"); ax.set_ylim(0, 5); ax.grid(True)
+        m = StaticMap(400, 300)
+        marker = CircleMarker((lon, lat), 'red', 10) # Attention : lon, lat pour staticmap
+        m.add_marker(marker)
+        image = m.render(zoom=10)
+        
+        # Sauvegarde temp
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-            plt.savefig(tmp.name, format='png', dpi=100); temp_path = tmp.name
+            image.save(tmp.name)
+            return tmp.name
+    except: return None
+
+# --- PDF GENERATOR ---
+def generate_pdf_report(data):
+    # 1. Graphique Temp
+    chart_path = None
+    try:
+        fig, ax = plt.subplots(figsize=(6, 2.5))
+        ax.plot(['2024', '2030'], [data.get('s24', 2.5), data.get('s30', 3.0)], 'r-o', lw=2)
+        ax.set_title("Trajectoire Risque Eau"); ax.set_ylim(0, 5); ax.grid(True)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            plt.savefig(tmp.name, format='png', dpi=100); chart_path = tmp.name
         plt.close(fig)
     except: pass
+
+    # 2. Carte Temp (NOUVEAU)
+    map_path = create_static_map_image(data.get('lat', 48.85), data.get('lon', 2.35))
 
     # PDF
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 20); pdf.cell(0, 20, "RAPPORT D'AUDIT 360", ln=1, align='C')
+    pdf.set_font("Arial", 'B', 20); pdf.cell(0, 15, "RAPPORT D'AUDIT 360", ln=1, align='C')
     pdf.set_font("Arial", 'B', 16); pdf.cell(0, 10, str(data.get('ent_name', '?')), ln=1, align='C')
     
-    pdf.ln(10)
-    pdf.set_font("Arial", '', 12)
-    pdf.cell(0, 10, f"Valorisation: {data.get('valo_finale',0):,.0f} EUR", ln=1)
-    pdf.cell(0, 10, f"Risque Climat 2030: {data.get('s30',0):.2f}/5", ln=1)
-    pdf.cell(0, 10, f"Impact VaR: -{abs(data.get('var_amount',0)):,.0f} EUR", ln=1)
-    
-    if temp_path:
-        try: pdf.image(temp_path, x=50, w=100); os.remove(temp_path)
+    pdf.ln(5)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(0, 8, f"Valo: {data.get('valo_finale',0):,.0f} EUR | CA: {data.get('ca',0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Localisation: {data.get('ville', '?')} ({data.get('pays', '?')})", ln=1)
+    pdf.ln(5)
+
+    # Insertion Images (Carte + Graphique)
+    if map_path:
+        pdf.cell(0, 8, "Localisation Site:", ln=1)
+        try: pdf.image(map_path, x=20, w=80)
+        except: pass
+        pdf.ln(5)
+        
+    if chart_path:
+        # On remonte un peu le curseur si besoin
+        if map_path: pdf.set_y(pdf.get_y() - 65); pdf.set_x(110)
+        else: pdf.cell(0, 8, "Trajectoire:", ln=1)
+        
+        try: pdf.image(chart_path, w=80) 
+        except: pass
+        pdf.ln(50 if map_path else 10)
+
+    # Nettoyage fichiers temp
+    if chart_path and os.path.exists(chart_path):
+        try: os.remove(chart_path)
+        except: pass
+    if map_path and os.path.exists(map_path):
+        try: os.remove(map_path)
         except: pass
 
-    pdf.ln(10)
+    # Détails
+    pdf.set_x(10)
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "DETAIL DES RISQUES (VAR)", ln=1)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(0, 8, f"Score Risque 2030: {data.get('s30',0):.2f}/5", ln=1)
+    pdf.cell(0, 8, f"Impact Financier Total: -{abs(data.get('var_amount',0)):,.0f} EUR", ln=1)
+    
+    pdf.ln(5)
     pdf.multi_cell(0, 5, f"Resume:\n{str(data.get('wiki_summary',''))[:2000]}")
     
-    # SORTIE SECURISEE (Bytes ou String selon version)
-    val = pdf.output(dest='S')
-    if isinstance(val, str):
-        return val.encode('latin-1', 'replace')
-    return val
+    return pdf.output(dest='S').encode('latin-1', 'replace')
 
 def generate_excel(data):
     output = io.BytesIO()
