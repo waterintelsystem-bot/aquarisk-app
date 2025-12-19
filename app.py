@@ -24,88 +24,129 @@ from staticmap import StaticMap, CircleMarker
 # ==============================================================================
 # 1. CONFIGURATION
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk V17.3 : Sans Échec", page_icon="🛡️", layout="wide")
-st.title("🛡️ AquaRisk V17.3 : Plateforme Audit (Mode Résilient)")
+st.set_page_config(page_title="AquaRisk V18 : OCR Financier", page_icon="🤖", layout="wide")
+st.title("🤖 AquaRisk V18 : Audit avec Lecture Automatique de Bilan")
 
-# Initialisation Session
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 if 'pappers_data' not in st.session_state: st.session_state.pappers_data = None
-if 'live_multiples' not in st.session_state: st.session_state.live_multiples = None
 if 'stock_data' not in st.session_state: st.session_state.stock_data = {"mcap": 0, "ev": 0}
+# Variables pour stocker les données extraites du PDF
+if 'pdf_financials' not in st.session_state: st.session_state.pdf_financials = None
 
 # ==============================================================================
-# 2. CHARGEMENT DATA (GARANTI SANS CRASH)
+# 2. CHARGEMENT DATA (SECURISE)
 # ==============================================================================
 @st.cache_data
-def get_dataset():
-    # 1. Création de données de secours (Backup)
-    data_backup = {
-        'name_0': ['France', 'United States', 'Germany', 'China', 'India', 'Brazil', 'United Kingdom', 'Italy', 'Spain'],
-        'name_1': ['Ile-de-France', 'California', 'Bavaria', 'Beijing', 'Maharashtra', 'Sao Paulo', 'London', 'Lombardy', 'Madrid'],
-        'score': [2.5, 3.8, 2.2, 4.1, 4.5, 2.8, 1.9, 2.6, 3.1]
-    }
-    df_backup = pd.DataFrame(data_backup)
+def load_data():
+    BACKUP_DATA = pd.DataFrame({
+        'name_0': ['France', 'United States', 'Germany', 'China', 'India', 'Brazil', 'United Kingdom'],
+        'name_1': ['Ile-de-France', 'California', 'Bavaria', 'Beijing', 'Maharashtra', 'Sao Paulo', 'London'],
+        'score': [2.5, 3.8, 2.2, 4.1, 4.5, 2.8, 1.9]
+    })
 
-    # 2. Tentative de lecture CSV Actuel
-    df_now = df_backup.copy()
-    if os.path.exists("risk_actuel.csv"):
+    def smart_read(filename):
+        if not os.path.exists(filename): return None
         try:
-            temp = pd.read_csv("risk_actuel.csv", sep=None, engine='python', on_bad_lines='skip')
-            temp.columns = [c.lower().strip() for c in temp.columns]
-            if 'name_0' in temp.columns and 'score' in temp.columns:
-                temp['score'] = pd.to_numeric(temp['score'].astype(str).str.replace(',', '.'), errors='coerce')
-                df_now = temp
-        except: pass # Si erreur, on garde le backup
+            for sep in [',', ';', '\t']:
+                try:
+                    df = pd.read_csv(filename, sep=sep, engine='python', on_bad_lines='skip')
+                    df.columns = [c.lower().strip() for c in df.columns]
+                    if 'name_0' in df.columns: return df
+                except: continue
+            return None
+        except: return None
 
-    # 3. Tentative de lecture CSV Futur
-    df_fut = df_now.copy()
-    df_fut['score'] = df_fut['score'] * 1.15 # Projection par défaut
-    
-    if os.path.exists("risk_futur.csv"):
-        try:
-            temp = pd.read_csv("risk_futur.csv", sep=None, engine='python', on_bad_lines='skip')
-            temp.columns = [c.lower().strip() for c in temp.columns]
-            if 'name_0' in temp.columns and 'score' in temp.columns:
-                temp['score'] = pd.to_numeric(temp['score'].astype(str).str.replace(',', '.'), errors='coerce')
-                # Filtre 2030 si colonnes existent
-                if 'year' in temp.columns:
-                    temp = temp[(temp['year'] == 2030)]
-                df_fut = temp
-        except: pass
+    df_now = smart_read("risk_actuel.csv")
+    if df_now is None: df_now = BACKUP_DATA
+    else: df_now['score'] = pd.to_numeric(df_now['score'].astype(str).str.replace(',', '.'), errors='coerce')
+
+    df_fut = smart_read("risk_futur.csv")
+    if df_fut is None:
+        df_fut = df_now.copy()
+        df_fut['score'] = df_fut['score'] * 1.15
+    else:
+        df_fut['score'] = pd.to_numeric(df_fut['score'].astype(str).str.replace(',', '.'), errors='coerce')
+        if 'year' in df_fut.columns:
+            df_fut = df_fut[(df_fut['year'] == 2030) & (df_fut['scenario'] == 'bau')]
 
     return df_now, df_fut
 
-# Chargement direct sans Try/Except bloquant
-df_actuel, df_futur = get_dataset()
+try:
+    df_actuel, df_futur = load_data()
+except: st.stop()
 
 # ==============================================================================
-# 3. FONCTIONS TECHNIQUES (API & CALCULS)
+# 3. NOUVEAU MOTEUR OCR FINANCIER
 # ==============================================================================
+def parse_french_number(text_num):
+    """Transforme '1 230 500,00' en float 1230500.0"""
+    try:
+        # On garde chiffres, virgules, points, signes moins
+        clean = re.sub(r'[^\d,\.-]', '', text_num)
+        # On remplace virgule par point
+        clean = clean.replace(',', '.')
+        # Si plusieurs points (ex: 1.000.000.00), on garde le dernier comme décimale
+        if clean.count('.') > 1:
+            clean = clean.replace('.', '', clean.count('.') - 1)
+        return float(clean)
+    except:
+        return 0.0
 
-# --- GPS ---
+def extract_financials_from_text(text):
+    """Analyse sémantique du texte pour trouver CA, Résultat et Capitaux"""
+    data = {"ca": 0, "resultat": 0, "capitaux": 0, "found": False}
+    text_lower = text.lower()
+    
+    # Dictionnaire de motifs (Patterns)
+    patterns = {
+        "ca": [r"chiffre d['’]?affaires\s*[:\-\s]?\s*([\d\s\.,]+)", r"total des produits d['’]?exploitation\s*[:\-\s]?\s*([\d\s\.,]+)"],
+        "resultat": [r"résultat net\s*[:\-\s]?\s*([\-]?[\d\s\.,]+)", r"bénéfice ou perte\s*[:\-\s]?\s*([\-]?[\d\s\.,]+)"],
+        "capitaux": [r"total capitaux propres\s*[:\-\s]?\s*([\d\s\.,]+)", r"situation nette\s*[:\-\s]?\s*([\d\s\.,]+)"]
+    }
+    
+    for key, regex_list in patterns.items():
+        for reg in regex_list:
+            match = re.search(reg, text_lower)
+            if match:
+                val_str = match.group(1)
+                # On filtre si la chaîne est trop courte ou bizarre
+                if len(val_str) > 2:
+                    val = parse_french_number(val_str)
+                    if val > 0 or (key == 'resultat' and val != 0):
+                        data[key] = val
+                        data["found"] = True
+                        break # On a trouvé pour ce critère
+    return data
+
+# ==============================================================================
+# 4. FONCTIONS TECH CLASSIQUES
+# ==============================================================================
 class MockLocation:
     def __init__(self, lat, lon): self.latitude = lat; self.longitude = lon
 
 def get_location_safe(ville, pays):
-    # Fallback immédiat pour éviter les temps d'attente
     clean_v = ville.lower().strip()
     fallback = {
         "paris": (48.8566, 2.3522), "lyon": (45.7640, 4.8357), "marseille": (43.2965, 5.3698),
-        "bordeaux": (44.8378, -0.5792), "toulouse": (43.6047, 1.4442), "lille": (50.6292, 3.0573),
-        "new york": (40.7128, -74.0060), "london": (51.5074, -0.1278), "berlin": (52.5200, 13.4050), 
-        "boulogne-billancourt": (48.8397, 2.2399)
+        "bordeaux": (44.8378, -0.5792), "toulouse": (43.6047, 1.4442), "new york": (40.7128, -74.0060)
     }
     if clean_v in fallback: return MockLocation(*fallback[clean_v])
+    for i in range(2):
+        try:
+            ua = f"AR_V18_{randint(1000,9999)}"
+            loc = Nominatim(user_agent=ua, timeout=8).geocode(f"{ville}, {pays}")
+            if loc: return loc
+        except: time.sleep(1); continue
+    return MockLocation(48.8566, 2.3522)
 
+def get_weather_history(lat, lon):
     try:
-        ua = f"AR_V173_{randint(1000,9999)}"
-        loc = Nominatim(user_agent=ua, timeout=5).geocode(f"{ville}, {pays}")
-        if loc: return loc
+        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={(datetime.now()-timedelta(days=90)).strftime('%Y-%m-%d')}&end_date={datetime.now().strftime('%Y-%m-%d')}&daily=precipitation_sum&timezone=auto"
+        r = requests.get(url, timeout=5).json()
+        if 'daily' in r: return f"{sum([x for x in r['daily']['precipitation_sum'] if x]):.0f}"
     except: pass
-    
-    return MockLocation(48.8566, 2.3522) # Default Paris
+    return "N/A"
 
-# --- API EXTERNES ---
 def get_pappers_financials(company_name, api_key):
     if not api_key: return None
     try:
@@ -114,11 +155,9 @@ def get_pappers_financials(company_name, api_key):
         if r.status_code != 200: return None
         res = r.json().get('resultats')
         if not res: return None
-        
         siren = res[0]['siren']
         fr = requests.get(f"https://api.pappers.fr/v2/entreprise?api_token={clean_key}&siren={siren}", timeout=5)
         fd = fr.json()
-        
         ca=0; res=0; cap=0; annee="N/A"
         for c in fd.get('finances', []):
             if c.get('annee_cloture_exercice'):
@@ -127,7 +166,7 @@ def get_pappers_financials(company_name, api_key):
                 cap = c.get('capitaux_propres', 0) or 0
                 annee = c['annee_cloture_exercice']
                 break
-        return {"nom": res[0]['nom_entreprise'], "ca": ca, "resultat": res, "capitaux": cap, "annee": annee}
+        return {"nom": res[0]['nom_entreprise'], "ca": ca, "resultat": res, "capitaux": cap, "ebitda": res*1.25, "annee": annee}
     except: return None
 
 def get_stock_advanced(ticker):
@@ -139,27 +178,18 @@ def get_stock_advanced(ticker):
         return m, e
     except: return 0, 0
 
-def get_weather_history(lat, lon):
-    try:
-        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={(datetime.now()-timedelta(days=90)).strftime('%Y-%m-%d')}&end_date={datetime.now().strftime('%Y-%m-%d')}&daily=precipitation_sum&timezone=auto"
-        r = requests.get(url, timeout=4).json()
-        if 'daily' in r: return f"{sum([x for x in r['daily']['precipitation_sum'] if x]):.0f}"
-    except: pass
-    return "N/A"
-
 def get_company_news(name):
     try:
         q = urllib.parse.quote(f'"{name}" (eau OR pollution OR environnement)')
         f = feedparser.parse(f"https://news.google.com/rss/search?q={q}&hl=fr-FR&gl=FR&ceid=FR:fr")
-        return [{"title": e.title, "link": e.link, "summary": e.summary[:200]} for e in f.entries[:5]]
+        return [{"title": e.title, "link": e.link, "summary": e.summary[:250]} for e in f.entries[:5]]
     except: return []
 
-def get_wiki_summary(name):
+def get_wiki_summary(company_name):
     try:
         wikipedia.set_lang('fr')
-        # Recherche d'abord
-        search = wikipedia.search(name)
-        if search: return wikipedia.page(search[0]).summary[:1000]
+        search = wikipedia.search(company_name)
+        if search: return wikipedia.page(search[0]).summary[:1500]
     except: pass
     return "Pas de données Wikipedia."
 
@@ -177,30 +207,25 @@ def extract_text_from_pdfs(files):
     for f in files:
         try:
             with pdfplumber.open(f) as pdf:
-                for p in pdf.pages[:5]: t += p.extract_text() or ""
+                for p in pdf.pages[:15]: t += p.extract_text() or ""
                 n.append(f.name)
         except: continue
     return t, n
 
 # ==============================================================================
-# 4. MOTEUR ANALYSE (RISQUE & VALO)
+# 5. MOTEUR ANALYSE
 # ==============================================================================
 def analyser_risque_geo(ville, pays):
     loc = get_location_safe(ville, pays)
-    
-    # Matching simple
-    pays_match = pays
-    if not df_actuel.empty:
-        best, score = process.extractOne(str(pays), df_actuel['name_0'].unique().astype(str))
-        if score > 60: pays_match = best
+    pays_match, score = process.extractOne(str(pays), df_actuel['name_0'].unique().astype(str))
+    if score < 60: pays_match = pays
 
-    # Scores
     s24 = 2.5
     if pays_match in df_actuel['name_0'].values:
         s24 = df_actuel[df_actuel['name_0'] == pays_match]['score'].mean()
     
     s30 = s24 * 1.1
-    if not df_futur.empty and pays_match in df_futur['name_0'].values:
+    if df_futur is not None and pays_match in df_futur['name_0'].values:
         s30 = df_futur[df_futur['name_0'] == pays_match]['score'].mean()
 
     s26 = s24 + ((s30 - s24) * 0.33)
@@ -212,7 +237,7 @@ def analyser_risque_geo(ville, pays):
     }
 
 # ==============================================================================
-# 5. PDF
+# 6. PDF
 # ==============================================================================
 def generer_carte(lat, lon):
     try:
@@ -228,8 +253,8 @@ def create_pdf(data, corpus, notes):
     pdf = FPDF()
     pdf.add_page()
     
-    pdf.set_font("Arial", 'B', 18)
-    pdf.cell(0, 15, clean(f"AUDIT V17.3: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
+    pdf.set_font("Arial", 'B', 20)
+    pdf.cell(0, 15, clean(f"RAPPORT V18: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
     pdf.ln(10)
     
     if data.get('lat'):
@@ -237,22 +262,21 @@ def create_pdf(data, corpus, notes):
         if f: pdf.image(f, x=20, w=170)
     pdf.ln(5)
     
-    # Finance
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "1. FINANCE & IMPACT", ln=1)
+    pdf.cell(0, 10, "1. VALORISATION & IMPACT", ln=1)
     pdf.set_font("Arial", size=11)
     
     val = data.get('valeur_entreprise', 0)
     var = data.get('var_2030', 0)
     
-    pdf.cell(60, 10, clean(f"Valo: {val:,.0f} $"), border=1)
+    pdf.cell(60, 10, clean(f"Valorisation: {val:,.0f} $"), border=1)
     pdf.cell(60, 10, clean(f"Methode: {data.get('source_ca', 'Manuel')}"), border=1)
     
     if var > 0:
-        pdf.set_text_color(200,0,0) # Rouge
+        pdf.set_text_color(200,0,0)
         txt_var = f"PERTE Estimee 2030: -{abs(var):,.0f} $"
     elif var < 0:
-        pdf.set_text_color(0,100,0) # Vert
+        pdf.set_text_color(0,100,0)
         txt_var = f"GAIN / STABILITE: +{abs(var):,.0f} $"
     else:
         pdf.set_text_color(0,0,0)
@@ -262,9 +286,8 @@ def create_pdf(data, corpus, notes):
     pdf.set_text_color(0,0,0)
     pdf.ln(15)
     
-    # Climat
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "2. CLIMAT & SYNTHESE", ln=1)
+    pdf.cell(0, 10, "2. RISQUE EAU", ln=1)
     pdf.set_font("Arial", size=11)
     
     s24 = data.get('s2024', 2.5); s30 = data.get('s2030', 2.5)
@@ -274,10 +297,8 @@ def create_pdf(data, corpus, notes):
     pdf.ln(10)
     
     pdf.set_font("Arial", 'I', 10)
-    pdf.multi_cell(0, 5, clean(f"Synthese IA:\n{data.get('txt_ia', '')}"))
-    pdf.ln(5)
+    pdf.multi_cell(0, 5, clean(f"Synthese IA: {data.get('txt_ia', '')}"))
     
-    # Sources
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, "3. SOURCES", ln=1)
@@ -294,12 +315,12 @@ def create_pdf(data, corpus, notes):
     if notes:
         pdf.ln(5)
         pdf.set_font("Arial", 'I', 10)
-        pdf.multi_cell(0, 6, clean(f"Notes Analyste: {notes}"))
+        pdf.multi_cell(0, 5, clean(f"Notes Analyste: {notes}"))
         
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
 # ==============================================================================
-# 6. INTERFACE
+# 7. INTERFACE
 # ==============================================================================
 with st.sidebar:
     st.header("⚙️ Config")
@@ -317,28 +338,51 @@ with c1:
     st.markdown("---")
     st.subheader("2. Finance")
     mode_val = st.radio("Type", ["Non Cotée", "Cotée", "Startup"])
-    valeur_finale = 0.0
-    source_info = "Manuel"
+    valeur_finale = 0.0; source_info = "Manuel"
     
     secteur_risk = st.selectbox("Secteur (Vulnérabilité)", ["Agroalimentaire (100%)", "Industrie (70%)", "BTP (40%)", "Commerce (20%)", "Logiciel (5%)"])
     vuln_factor = {"Agroalimentaire": 1.0, "Industrie": 0.7, "BTP": 0.4, "Commerce": 0.2, "Logiciel": 0.05}.get(secteur_risk.split()[0], 0.5)
 
-    # --- NON COTÉE ---
     if mode_val == "Non Cotée":
-        if st.button("🔍 Pappers"):
-            with st.spinner("API..."):
-                i = get_pappers_financials(ent, pappers_key)
-                if i: 
-                    st.session_state.pappers_data = i
-                    st.success("Bilan trouvé !")
-                else: st.warning("Pas de bilan (Clé ou Ent. invalide)")
+        # --- ZONE INTELLIGENTE : PAPPERS OU PDF ---
+        col_api, col_pdf = st.columns(2)
+        with col_api:
+            if st.button("🔍 Pappers"):
+                with st.spinner("API..."):
+                    i = get_pappers_financials(ent, pappers_key)
+                    if i: 
+                        st.session_state.pappers_data = i
+                        st.success("Bilan OK!")
+                    else: st.warning("Pas trouvé.")
         
+        with col_pdf:
+            st.caption("Ou glissez un Bilan PDF ici 👇")
+            uploaded_bilan = st.file_uploader("Bilan", type=["pdf"], key="bilan_upload")
+            if uploaded_bilan:
+                with st.spinner("Lecture OCR..."):
+                    txt_bilan, _ = extract_text_from_pdfs([uploaded_bilan])
+                    fin_data = extract_financials_from_text(txt_bilan)
+                    if fin_data['found']:
+                        st.session_state.pdf_financials = fin_data
+                        st.success("Données extraites du PDF !")
+        
+        # --- REMPLISSAGE AUTO ---
         ca_val = 1000000.0; res_val = 100000.0; cap_val = 200000.0
-        if st.session_state.pappers_data:
+        
+        # Priorité : 1. PDF, 2. Pappers, 3. Défaut
+        if st.session_state.get('pdf_financials') and st.session_state.pdf_financials.get('found'):
+            d = st.session_state.pdf_financials
+            if d['ca'] > 0: ca_val = float(d['ca'])
+            if d['resultat'] != 0: res_val = float(d['resultat'])
+            if d['capitaux'] > 0: cap_val = float(d['capitaux'])
+            st.info(f"Source: Bilan PDF (CA: {ca_val:,.0f}€)")
+            
+        elif st.session_state.pappers_data:
             d = st.session_state.pappers_data
             if d['ca']: ca_val = float(d['ca'])
             if d['resultat']: res_val = float(d['resultat'])
             if d['capitaux']: cap_val = float(d['capitaux'])
+            st.info(f"Source: Pappers (CA: {ca_val:,.0f}€)")
 
         m_pme = st.selectbox("Méthode", ["Multiple CA", "Multiple EBITDA", "DCF", "Patrimonial"])
         
@@ -356,33 +400,25 @@ with c1:
         valeur_finale = st.number_input("Valo Retenue", value=val_calc)
         source_info = m_pme
 
-    # --- COTÉE ---
     elif mode_val == "Cotée":
         ticker = st.text_input("Ticker", "BN.PA")
         ind = st.selectbox("Indicateur", ["Market Cap", "Enterprise Value"])
         if st.button("Yahoo"):
             m, e = get_stock_advanced(ticker)
             if m > 0: st.session_state.stock_data = {"mcap":m, "ev":e}
-        
         ref = st.session_state.stock_data.get('mcap', 0)
-        if ind == "Enterprise Value": ref = st.session_state.stock_data.get('ev', 0)
-        valeur_finale = st.number_input("Valo Retenue", value=ref if ref > 0 else 1000000.0)
+        valeur_finale = st.number_input("Valo", value=ref if ref > 0 else 1000000.0)
         source_info = f"Bourse {ticker}"
 
-    # --- STARTUP ---
     else: 
-        st.info("Méthode VC Standard")
         stade = st.selectbox("Stade", ["Pre-Seed", "Seed", "Series A", "Series B"])
-        ranges = {"Pre-Seed": (0.5, 2), "Seed": (2, 8), "Series A": (8, 30), "Series B": (30, 80)}
-        mini, maxi = ranges.get(stade, (1, 5))
-        st.caption(f"Range: {mini}M - {maxi}M")
-        valeur_finale = st.slider("Valo (M$)", mini*1e6, maxi*1e6, (mini+maxi)/2 * 1e6)
+        valeur_finale = st.slider("Valo", 1e6, 8e7, 5e6)
         source_info = f"VC {stade}"
 
     st.markdown("---")
     st.write("📂 **3. Data Room**")
     notes = st.text_area("Notes", height=100)
-    uploaded_docs = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
+    uploaded_docs = st.file_uploader("PDFs (Analyse Risques)", type=["pdf"], accept_multiple_files=True)
     
     if st.button("🚀 AUDIT"):
         with st.spinner("Analyse..."):
@@ -396,7 +432,6 @@ with c1:
                 
                 corpus = f"{notes} {web} {wiki} {doc_txt} {' '.join([n['title'] for n in news])}"
                 
-                # Calcul Delta VaR
                 delta_risk = res['s2030'] - res['s2024']
                 impact_30 = valeur_finale * (delta_risk / 5.0) * vuln_factor
                 impact_26 = valeur_finale * ((res['s2026'] - res['s2024']) / 5.0) * vuln_factor
@@ -428,7 +463,7 @@ with c2:
         k2.metric("Trajectoire", f"{r.get('s2030',0):.2f}/5", delta=f"{delta_r:.2f}", delta_color="inverse")
         
         var_30 = r.get('var_2030', 0)
-        label_var = f"{var_30:,.0f} $"
+        label_var = f"-{abs(var_30):,.0f} $" if var_30 > 0 else f"+{abs(var_30):,.0f} $"
         color_var = "inverse" if var_30 > 0 else "normal"
         k3.metric("Impact 2030", label_var, delta="VaR", delta_color=color_var)
         
