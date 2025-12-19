@@ -11,7 +11,7 @@ import feedparser
 import xlsxwriter
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('Agg') # Pour éviter les erreurs de serveur
+matplotlib.use('Agg') # Indispensable pour éviter les erreurs de serveur
 
 # --- INITIALISATION MEMOIRE ---
 def init_session():
@@ -32,11 +32,13 @@ def init_session():
         
         # Docs
         'news': [], 'wiki_summary': "Pas de données.",
+        'pappers_token': "", 
     }
     for k, v in defaults.items():
-        if k not in st.session_state: st.session_state[k] = v
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-# --- LISTE SECTEURS ETENDUE ---
+# --- LISTE SECTEURS ---
 SECTEURS = {
     "Agroalimentaire (100%)": 1.0,
     "Mines & Métaux (90%)": 0.9,
@@ -57,21 +59,18 @@ SECTEURS = {
 }
 SECTEURS_LISTE = list(SECTEURS.keys())
 
-# --- CONNECTEUR PAPPERS (SIREN + NOM) ---
+# --- CONNECTEUR PAPPERS ---
 def get_pappers_data(query, api_key):
     if not api_key: return None, "Clé API manquante."
     try:
-        # Détection automatique SIREN (9 chiffres)
-        is_siren = re.fullmatch(r'\d{9}', query.replace(' ', ''))
-        
-        if is_siren:
+        # Recherche SIREN ou NOM
+        if re.fullmatch(r'\d{9}', query.replace(' ', '')):
             url = f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={query.replace(' ', '')}"
             r = requests.get(url, timeout=5)
             if r.status_code != 200: return None, "SIREN introuvable."
             details = r.json()
             nom = details.get('nom_entreprise', 'Inconnu')
         else:
-            # Recherche par nom
             url_search = "https://api.pappers.fr/v2/recherche"
             r = requests.get(url_search, params={"q": query, "api_token": api_key, "par_page": 1}, timeout=5)
             data = r.json()
@@ -92,18 +91,14 @@ def get_pappers_data(query, api_key):
         return stats, nom
     except Exception as e: return None, str(e)
 
-# --- CONNECTEUR YAHOO (Renforcé) ---
+# --- CONNECTEUR YAHOO ---
 def get_yahoo_data(ticker):
     try:
         t = yf.Ticker(ticker)
-        # Tente de récupérer le nom long pour confirmer
         name = t.info.get('longName')
-        if not name: 
-            # Essai avec .PA si non fourni
-            if not ticker.endswith(".PA"):
-                return get_yahoo_data(ticker + ".PA")
-            return 0.0, None, None, None
-
+        if not name and not ticker.endswith(".PA"):
+             return get_yahoo_data(ticker + ".PA")
+        
         mcap = t.info.get('marketCap') or t.fast_info.get('market_cap')
         sector = t.info.get('sector', 'Inconnu')
         return float(mcap), name, sector, ticker
@@ -125,10 +120,9 @@ def run_ocr_scan(file_obj):
     try:
         full_text = ""
         with pdfplumber.open(file_obj) as pdf:
-            for p in pdf.pages[:30]: full_text += (p.extract_text() or "") + "\n"
+            for p in pdf.pages[:20]: full_text += (p.extract_text() or "") + "\n"
         
         text_upper = full_text.upper()
-        # Mots clés étendus
         patterns = {
             'ca': ["CHIFFRES D'AFFAIRES", "PRODUITS D'EXPLOITATION", "VENTES", "TOTAL DES PRODUITS"],
             'res': ["RESULTAT NET", "BENEFICE OU PERTE", "RESULTAT DE L'EXERCICE"],
@@ -141,53 +135,51 @@ def run_ocr_scan(file_obj):
                     idx = text_upper.find(kw)
                     window = text_upper[idx:idx+400]
                     nums = re.findall(r'-?\s*(?:\d{1,3}(?:\s\d{3})*|\d+)(?:[\.,]\d+)?', window)
-                    
                     valid_nums = []
                     for n in nums:
                         val = clean_number(n)
-                        # Filtre années et incohérences
                         if abs(val) > 2050 or (abs(val) > 0 and abs(val) < 1900):
                             valid_nums.append(val)
-                    
                     if valid_nums:
                         if key == 'ca': stats['ca'] = max(valid_nums, key=abs)
                         else: stats[key] = valid_nums[0]
                         stats['found'] = True
                         break
-    except Exception as e: return stats, f"Erreur technique: {str(e)}"
+    except Exception as e: return stats, f"Erreur: {str(e)}"
     
-    msg = "Données trouvées" if stats['found'] else "Aucun chiffre financier identifié"
+    msg = "Données trouvées" if stats['found'] else "Aucun chiffre identifié"
     return stats, msg
 
-# --- INTELLIGENCE (Wiki Fallback) ---
+# --- INTELLIGENCE ---
 def get_wiki_summary(name):
-    # Nettoyage du nom pour la recherche (enlève SA, SAS, etc)
     clean_name = re.sub(r'\s(SA|SAS|SARL|INC|LTD)', '', name, flags=re.IGNORECASE).strip()
     try:
         import urllib.parse
         url = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(clean_name)}"
         r = requests.get(url, timeout=3)
-        if r.status_code == 200:
-            return r.json().get('extract', "Pas de résumé trouvé.")
+        if r.status_code == 200: return r.json().get('extract', "Pas de résumé trouvé.")
         return "Page Wikipedia introuvable."
-    except: return "Erreur de connexion Wikipedia."
+    except: return "Erreur connexion."
 
-# --- GENERATEUR PDF AVEC GRAPHIQUE ---
+# --- GENERATEUR PDF (CORRIGÉ) ---
 def generate_pdf_report(data):
-    # 1. Générer le graphique en image
+    # 1. Générer le graphique en mémoire (CORRECTIF ICI)
+    img_buf = None
     try:
         fig, ax = plt.subplots(figsize=(6, 3))
         years = ['2024', '2030']
-        scores = [data.get('s24', 0), data.get('s30', 0)]
-        ax.plot(years, scores, marker='o', color='red', linestyle='-')
-        ax.set_title('Trajectoire Risque Eau')
+        scores = [data.get('s24', 2.5), data.get('s30', 3.0)]
+        ax.plot(years, scores, marker='o', color='red', linestyle='-', linewidth=2)
+        ax.fill_between(years, scores, 0, color='red', alpha=0.1)
+        ax.set_title('Trajectoire Risque Eau (Score / 5)')
         ax.set_ylim(0, 5)
         ax.grid(True, linestyle='--', alpha=0.6)
         
         img_buf = io.BytesIO()
         plt.savefig(img_buf, format='png', dpi=100)
         img_buf.seek(0)
-    except: img_buf = None
+        plt.close(fig) # Fermer pour libérer la mémoire
+    except: pass
 
     # 2. Créer le PDF
     pdf = FPDF()
@@ -207,8 +199,8 @@ def generate_pdf_report(data):
     pdf.set_font("Arial", '', 12)
     pdf.ln(5)
     pdf.cell(0, 8, f"Valorisation: {data.get('valo_finale', 0):,.0f} EUR", ln=1)
-    pdf.cell(0, 8, f"Methode: {data.get('mode_valo', 'Manuel')}", ln=1)
-    pdf.cell(0, 8, f"Chiffre d'Affaires: {data.get('ca', 0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Source: {data.get('source_data', 'Manuel')}", ln=1)
+    pdf.cell(0, 8, f"CA: {data.get('ca', 0):,.0f} EUR", ln=1)
     pdf.ln(10)
 
     # Climat
@@ -217,7 +209,7 @@ def generate_pdf_report(data):
     pdf.set_font("Arial", '', 12)
     pdf.ln(5)
     pdf.cell(0, 8, f"Localisation: {data.get('ville', '?')}", ln=1)
-    pdf.cell(0, 8, f"Secteur: {data.get('secteur', '?')}", ln=1)
+    pdf.cell(0, 8, f"Score 2030: {data.get('s30', 0):.2f} / 5.00", ln=1)
     
     var = data.get('var_amount', 0)
     txt_var = f"IMPACT FINANCIER (VaR): -{abs(var):,.0f} EUR" if var > 0 else "Impact: Faible"
@@ -225,11 +217,11 @@ def generate_pdf_report(data):
     pdf.cell(0, 8, txt_var, ln=1)
     pdf.set_text_color(0, 0, 0)
     
-    # Insertion Graphique
+    # Insertion Graphique (CORRECTIF ICI : AJOUT DE TYPE='PNG')
     if img_buf:
         pdf.ln(5)
-        # x, y, w, h
-        pdf.image(img_buf, x=50, w=100)
+        # On force le format PNG pour éviter l'erreur rfind
+        pdf.image(img_buf, x=50, w=100, type='PNG') 
         pdf.ln(5)
 
     # Contexte
