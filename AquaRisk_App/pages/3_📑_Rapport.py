@@ -1,47 +1,35 @@
 import streamlit as st
 import utils
 
-st.title("📑 Rapport Final & Exports")
+# --- OBLIGATOIRE ---
+utils.init_session()
 
-# Vérification que l'audit est lancé
-if st.session_state.get('valo_finale', 0) == 0:
-    st.warning("⚠️ Attention : Aucune valorisation n'a été faite. Le rapport sera incomplet.")
+st.title("📑 Rapport & Sources")
 
-st.markdown("### 1. Aperçu de l'Intelligence")
-st.info("Résumé généré via Wikipedia & Web")
+st.markdown("### 1. Intelligence Artificielle")
+st.info(f"Source : Wikipedia & Web")
 st.write(st.session_state.get('wiki_summary', 'Pas de données.'))
 
 st.markdown("### 2. Sources Détectées")
-if st.session_state['news']:
-    for n in st.session_state['news']:
+# Utilisation de .get() pour éviter le KeyError si 'news' n'existe pas
+news = st.session_state.get('news', [])
+if news:
+    for n in news:
         st.write(f"🔗 [{n['title']}]({n['link']})")
 else:
     st.warning("Aucune actualité récente trouvée.")
 
 st.markdown("---")
-st.markdown("### 3. Zone de Téléchargement")
+st.markdown("### 3. Exports")
 
 c1, c2 = st.columns(2)
-
 with c1:
-    # BOUTON PDF ROBUSTE
-    if st.button("📄 Générer le PDF Complet"):
-        with st.spinner("Génération du document..."):
-            pdf_data = utils.generate_pdf_report(st.session_state)
-            st.download_button(
-                "📥 Télécharger le PDF", 
-                data=pdf_data, 
-                file_name=f"Audit_{st.session_state['ent_name']}.pdf", 
-                mime="application/pdf"
-            )
+    if st.button("Générer PDF Complet"):
+        pdf_data = utils.generate_pdf_report(st.session_state)
+        st.download_button("📥 Télécharger PDF", data=pdf_data, file_name="Rapport.pdf", mime="application/pdf")
 
 with c2:
-    if st.button("📊 Générer les Données Excel"):
+    if st.button("Générer Excel Data"):
         xls_data = utils.generate_excel(st.session_state)
-        st.download_button(
-            "📥 Télécharger Excel", 
-            data=xls_data, 
-            file_name="Data_Audit.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("📊 Télécharger Excel", data=xls_data, file_name="Data.xlsx")
         
