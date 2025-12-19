@@ -1,24 +1,26 @@
 import streamlit as st
 import utils
 
-st.title("💰 Module Financier")
+st.title("💰 Module Financier & Identité")
 
-# --- 1. IDENTITÉ & SECTEUR (CRITIQUE POUR CLIMAT) ---
+# --- 1. IDENTITÉ & SECTEUR ---
+st.markdown("### 1. Identité de la Cible")
 c1, c2 = st.columns(2)
 with c1: 
     st.session_state['ent_name'] = st.text_input("Nom de l'entreprise", st.session_state['ent_name'])
 with c2: 
-    # Liste complète des secteurs avec vulnérabilité cachée
+    # Menu déroulant avec % visibles
     secteur_choix = st.selectbox(
         "Secteur d'Activité (Impact Vulnérabilité)", 
-        list(utils.SECTEURS.keys()),
+        utils.SECTEURS_LISTE, # Liste importée de utils
         index=0
     )
     st.session_state['secteur'] = secteur_choix
 
 st.markdown("---")
 
-# --- 2. MODE DE VALORISATION ---
+# --- 2. VALORISATION ---
+st.markdown("### 2. Étude Financière")
 mode = st.radio("Type d'Entreprise", ["PME (Bilan)", "Cotée (Bourse)", "Startup (Levée)"], horizontal=True)
 st.session_state['mode_valo'] = mode
 
@@ -75,8 +77,7 @@ elif mode == "Cotée (Bourse)":
             st.session_state['res'] = mcap * 0.08
             st.success(f"Trouvé : {name} ({sec}) | Valo : {mcap:,.0f}€")
         else:
-            st.error("Ticker introuvable. Vérifiez sur Yahoo Finance (ex: ajoutez .PA pour Paris).")
-            
+            st.error("Ticker introuvable. Vérifiez sur Yahoo Finance.")
     st.number_input("Capitalisation Boursière (€)", key="valo_finale")
 
 else: # Startup
@@ -89,8 +90,16 @@ else: # Startup
     st.info(f"Fourchette Marché : {mini/1e6}M€ - {maxi/1e6}M€")
     val_calc = st.slider("Valorisation (€)", mini, maxi, (mini+maxi)/2)
     st.session_state['valo_finale'] = val_calc
-    # Fake metrics for report
-    st.session_state['ca'] = val_calc * 0.1
-    st.session_state['res'] = -val_calc * 0.1
 
-st.metric("VALORISATION RETENUE", f"{st.session_state['valo_finale']:,.0f} €")
+st.markdown("---")
+
+# --- 3. BOUTON D'ACTION (VALIDATION) ---
+col_v1, col_v2 = st.columns([2, 1])
+with col_v1:
+    st.info(f"Valorisation calculée : {st.session_state['valo_finale']:,.0f} €")
+with col_v2:
+    if st.button("✅ VALIDER L'ÉTUDE FINANCIÈRE", type="primary"):
+        st.session_state['audit_launched'] = True # On active l'audit
+        st.toast("Données financières enregistrées ! Passez à l'onglet Climat.", icon="💾")
+        st.success("Finance Validée.")
+        
