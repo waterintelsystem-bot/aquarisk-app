@@ -4,15 +4,11 @@ import folium
 from streamlit_folium import st_folium
 import pandas as pd
 from random import randint
-# IMPORT CRUCIAL CORRIGÉ (Plus de try/except qui cachent les erreurs)
 from geopy.geocoders import Nominatim 
-from geopy.exc import GeocoderTimedOut
 
-# --- 1. CONFIGURATION ---
 utils.init_session()
 st.title("🌍 Climat & Risques")
 
-# Base de données simple pour faciliter la saisie
 GEO_DATA = {
     "France": ["Paris", "Lyon", "Marseille", "Bordeaux", "Lille", "Toulouse", "Nantes", "Strasbourg", "Autre"],
     "États-Unis": ["New York", "Los Angeles", "Chicago", "Houston", "Miami", "San Francisco", "Autre"],
@@ -20,7 +16,6 @@ GEO_DATA = {
     "Royaume-Uni": ["Londres", "Manchester", "Liverpool", "Édimbourg", "Autre"],
     "Chine": ["Shanghai", "Pékin", "Shenzhen", "Hong Kong", "Autre"],
     "Inde": ["Mumbai", "Delhi", "Bangalore", "Autre"],
-    "Brésil": ["São Paulo", "Rio de Janeiro", "Brasilia", "Autre"],
     "Autre Pays": ["Autre"]
 }
 
@@ -29,7 +24,6 @@ if st.session_state.get('valo_finale', 0) == 0:
 else:
     st.info(f"Analyse pour : {st.session_state['ent_name']} ({st.session_state['valo_finale']:,.0f} €)")
 
-# --- 2. FORMULAIRE DE LOCALISATION ---
 st.markdown("### 📍 Localisation du Site Industriel")
 
 with st.container():
@@ -43,27 +37,19 @@ with st.container():
         ville_select = st.selectbox("Ville / Région", villes_dispo)
         ville_final = st.text_input("Nom de la Ville", value="") if ville_select == "Autre" else ville_select
 
-# --- 3. BOUTON D'ACTION ---
 if st.button("⚡ ACTUALISER LOCALISATION & RISQUE", type="primary"):
     
-    # 1. Mise à jour de la mémoire (Nom de la ville)
     st.session_state['ville'] = ville_final
     st.session_state['pays'] = pays_final
     st.session_state['climat_calcule'] = True
-    
-    # 2. Force le redessin de la carte
     st.session_state['map_id'] = st.session_state.get('map_id', 0) + 1
     
-    with st.spinner(f"Recherche GPS pour {ville_final} ({pays_final})..."):
+    with st.spinner(f"Recherche GPS & Données pour {ville_final}..."):
         found = False
         try:
-            # User-Agent aléatoire pour éviter le blocage (Erreur 403)
             ua = f"AquaRisk_User_{randint(10000,99999)}"
             geo = Nominatim(user_agent=ua, timeout=10)
-            
-            # Recherche GPS
-            query = f"{ville_final}, {pays_final}"
-            loc = geo.geocode(query)
+            loc = geo.geocode(f"{ville_final}, {pays_final}")
             
             if loc:
                 st.session_state['lat'] = loc.latitude
@@ -71,60 +57,77 @@ if st.button("⚡ ACTUALISER LOCALISATION & RISQUE", type="primary"):
                 found = True
                 st.success(f"✅ GPS Trouvé : {loc.address}")
             else:
-                st.error(f"❌ Ville introuvable : '{query}'. Coordonnées par défaut (Paris) utilisées.")
-                # On ne change PAS lat/lon si on ne trouve pas, pour éviter de tout casser
-                
-        except Exception as e:
-            st.error(f"Erreur Technique GPS : {e}")
+                st.error("Ville introuvable. Coordonnées par défaut utilisées.")
+        except Exception as e: st.error(f"Erreur GPS : {e}")
 
-        # 3. Calculs des Scores (Doit se faire APRES la mise à jour GPS)
-        # C'est ici que les chiffres 2.92 / 3.50 vont enfin changer !
+        # SCORES
         s24, s30 = utils.calculate_dynamic_score(st.session_state['lat'], st.session_state['lon'])
         st.session_state['s24'] = s24
         st.session_state['s30'] = s30
         
-        # 4. Calcul VaR
+        # VAR
         try:
             s_txt = st.session_state.get('secteur', '')
             import re
-            match = re.search(r'\((\d+)%\)', s_txt)
-            vuln = int(match.group(1))/100.0 if match else 0.5
+            vuln = int(re.search(r'\((\d+)%\)', s_txt).group(1))/100.0 if re.search(r'\((\d+)%\)', s_txt) else 0.5
         except: vuln = 0.5
-        
         val = st.session_state.get('valo_finale', 0)
         st.session_state['var_amount'] = val * ((s30 - s24)/5.0) * vuln
         
-        # 5. Wiki
+        # DATA EXTERNES (NOUVEAU)
         st.session_state['wiki_summary'] = utils.get_wiki_summary(st.session_state['ent_name'])
+        st.session_state['news'] = utils.get_company_news(st.session_state['ent_name'])
+        st.session_state['weather_info'] = utils.get_weather_data(st.session_state['lat'], st.session_state['lon'])
 
-    # Rafraîchissement immédiat de la page
     if found: st.rerun()
 
-# --- 4. AFFICHAGE RESULTATS ---
 if st.session_state.get('climat_calcule'):
     st.divider()
     
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Risque 2024", f"{st.session_state['s24']:.2f}/5")
-    # Le delta montre la différence exacte entre le nouveau score et l'ancien
-    k2.metric("Risque 2030", f"{st.session_state['s30']:.2f}/5", delta=f"+{st.session_state['s30']-st.session_state['s24']:.2f}")
-    k3.metric("VaR (Impact)", f"-{st.session_state['var_amount']:,.0f} €", delta_color="inverse")
-
-    map_col, graph_col = st.columns(2)
+    # 1. ONGLETS POUR ORGANISER L'INFO
+    tab1, tab2, tab3 = st.tabs(["📊 Risques & Carte", "📰 Sources & Presse", "🌦️ Météo Site"])
     
-    with map_col:
-        # Clé unique pour forcer le nettoyage de la carte
-        unique_key = f"map_{st.session_state['ville']}_{st.session_state['map_id']}"
+    with tab1:
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Risque 2024", f"{st.session_state['s24']:.2f}/5")
+        k2.metric("Risque 2030", f"{st.session_state['s30']:.2f}/5", delta=f"+{st.session_state['s30']-st.session_state['s24']:.2f}")
+        k3.metric("VaR (Impact)", f"-{st.session_state['var_amount']:,.0f} €", delta_color="inverse")
+
+        map_col, graph_col = st.columns(2)
+        with map_col:
+            unique_key = f"map_{st.session_state['ville']}_{st.session_state['map_id']}"
+            m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=10)
+            folium.Marker([st.session_state['lat'], st.session_state['lon']], icon=folium.Icon(color='red')).add_to(m)
+            st_folium(m, height=300, use_container_width=True, key=unique_key)
+        with graph_col:
+            df = pd.DataFrame({"Année": ["2024", "2030"], "Risque": [st.session_state['s24'], st.session_state['s30']]}).set_index("Année")
+            st.line_chart(df)
+
+    with tab2:
+        st.subheader(f"Actualités : {st.session_state['ent_name']}")
+        news = st.session_state.get('news', [])
+        if news:
+            for n in news:
+                st.markdown(f"🔗 **[{n['title']}]({n['link']})**")
+                st.caption(f"Publié : {n['published']}")
+        else:
+            st.warning("Aucune actualité trouvée ou erreur de connexion.")
         
-        m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=10)
-        folium.Marker(
-            [st.session_state['lat'], st.session_state['lon']], 
-            popup=f"{st.session_state['ent_name']}\n{st.session_state['ville']}",
-            icon=folium.Icon(color='red', icon='info-sign')
-        ).add_to(m)
-        st_folium(m, height=300, use_container_width=True, key=unique_key)
-        
-    with graph_col:
-        df = pd.DataFrame({"Année": ["2024", "2030"], "Risque": [st.session_state['s24'], st.session_state['s30']]}).set_index("Année")
-        st.line_chart(df)
-        
+        st.divider()
+        st.subheader("Contexte Wikipedia")
+        st.write(st.session_state.get('wiki_summary'))
+
+    with tab3:
+        w = st.session_state.get('weather_info')
+        if w:
+            c_now, c_forecast = st.columns(2)
+            with c_now:
+                st.metric("Température Actuelle", f"{w['temp']} °C")
+                st.metric("Vitesse Vent", f"{w['wind']} km/h")
+            with c_forecast:
+                st.write("**Prévisions (3 jours)**")
+                for day in w.get('forecast', []):
+                    st.write(f"📅 **{day['day']}** : Max {day['temp_max']}°C | 🌧️ {day['rain']}mm")
+        else:
+            st.error("Données météo indisponibles.")
+            
