@@ -17,15 +17,15 @@ from bs4 import BeautifulSoup
 import wikipedia
 import pdfplumber
 import yfinance as yf
-from thefuzz import process
+from thefuzz import process, fuzz # IMPORT FUZZY LOGIC
 from datetime import datetime, timedelta
 from staticmap import StaticMap, CircleMarker
 
 # ==============================================================================
 # 1. CONFIGURATION
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk V18.3 : Custom Multiples", page_icon="🎛️", layout="wide")
-st.title("🎛️ AquaRisk V18.3 : Audit Expert avec Valorisation Sur-Mesure")
+st.set_page_config(page_title="AquaRisk V18.4 : OCR Fuzzy", page_icon="🧠", layout="wide")
+st.title("🧠 AquaRisk V18.4 : Moteur OCR Flou (Tolérance aux fautes)")
 
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 if 'pappers_data' not in st.session_state: st.session_state.pappers_data = None
@@ -75,44 +75,79 @@ try:
 except: st.stop()
 
 # ==============================================================================
-# 3. MOTEUR OCR & TECH
+# 3. MOTEUR OCR FINANCIER "FUZZY" (VERSION 4)
 # ==============================================================================
 def parse_french_number(text_num):
+    """Nettoie agressivement : '1 230 500' -> 1230500.0"""
     try:
-        clean = text_num.replace(' ', '').replace(')', '').replace('(', '-')
+        # Nettoyage des guillemets et espaces insécables
+        clean = text_num.replace(' ', '').replace(')', '').replace('(', '-').replace('"', '').replace("'", "")
+        # On ne garde que chiffres, virgules, points, moins
         clean = re.sub(r'[^\d,\.-]', '', clean)
         clean = clean.replace(',', '.')
-        if clean.count('.') > 1: clean = clean.replace('.', '', clean.count('.') - 1)
+        # Gestion des multiples points (ex: 1.000.000.00)
+        if clean.count('.') > 1:
+            clean = clean.replace('.', '', clean.count('.') - 1)
         return float(clean)
-    except: return None
+    except:
+        return None
 
 def extract_financials_from_text(text):
+    """
+    Analyse avec Tolérance (Fuzzy Matching)
+    Si le robot voit "CHIFFRES D AFFAIRES NET", il comprend "CA".
+    """
     data = {"ca": 0, "resultat": 0, "capitaux": 0, "found": False}
     lines = text.split('\n')
-    patterns = {
-        "ca": ["CHIFFRES D'AFFAIRES NETS", "Total des produits d'exploitation", "Ventes de marchandises"],
-        "resultat": ["BENEFICE OU PERTE", "RESULTAT DE L'EXERCICE (bénéfice ou perte)", "RESULTAT DE L'EXERCICE"],
-        "capitaux": ["TOTAL CAPITAUX PROPRES", "CAPITAUX PROPRES", "Situation nette"]
+    
+    # Motifs cibles
+    target_labels = {
+        "ca": ["CHIFFRES D'AFFAIRES NETS", "TOTAL DES PRODUITS D'EXPLOITATION", "VENTES DE MARCHANDISES"],
+        "resultat": ["BENEFICE OU PERTE", "RESULTAT DE L'EXERCICE", "RESULTAT NET", "RESULTAT DE L EXERCICE"],
+        "capitaux": ["TOTAL CAPITAUX PROPRES", "CAPITAUX PROPRES", "SITUATION NETTE"]
     }
+    
     for line in lines:
-        line_clean = line.strip().upper()
-        for p in patterns["ca"]:
-            if p in line_clean and data["ca"] == 0:
-                nums = re.findall(r'-?[\d\s]+(?:,[\d]+)?', line)
-                valid = [parse_french_number(n) for n in nums if parse_french_number(n) is not None]
-                if valid: data["ca"] = max(valid); data["found"] = True
-        for p in patterns["resultat"]:
-            if p in line_clean and data["resultat"] == 0:
-                nums = re.findall(r'-?[\d\s]+(?:,[\d]+)?', line)
-                valid = [parse_french_number(n) for n in nums if parse_french_number(n) is not None]
-                if valid: data["resultat"] = valid[0]; data["found"] = True
-        for p in patterns["capitaux"]:
-            if p in line_clean and data["capitaux"] == 0:
-                nums = re.findall(r'-?[\d\s]+(?:,[\d]+)?', line)
-                valid = [parse_french_number(n) for n in nums if parse_french_number(n) is not None]
-                if valid: data["capitaux"] = max(valid); data["found"] = True
+        if len(line) < 5: continue # Ignore lignes vides
+        line_upper = line.strip().upper()
+        
+        # Pour chaque métrique (CA, Res, Cap)
+        for metric, keywords in target_labels.items():
+            if data[metric] == 0: # Si pas encore trouvé
+                # Test de ressemblance (Fuzzy)
+                best_match, score = process.extractOne(line_upper, keywords)
+                
+                # Si ressemblance > 85% OU mot clé présent textuellement
+                if score >= 85 or any(k in line_upper for k in keywords):
+                    # Extraction des nombres sur la ligne
+                    # Regex large qui capture "12 345" ou "- 12 345,00" ou "12.345"
+                    nums = re.findall(r'-?\s*[\d]+[ \d]*[\.,]?[ \d]*', line)
+                    
+                    valid_nums = []
+                    for n in nums:
+                        val = parse_french_number(n)
+                        if val is not None: valid_nums.append(val)
+                    
+                    if valid_nums:
+                        # LOGIQUE DE SELECTION
+                        # Souvent, la ligne contient [N] [N-1] [Ecart]
+                        # Le CA est souvent le plus grand chiffre
+                        # Le Résultat peut être négatif, donc on prend celui avec la plus grande valeur absolue
+                        if metric == "ca":
+                            data["ca"] = max(valid_nums)
+                        elif metric == "resultat":
+                            # On prend le premier chiffre significatif trouvé sur la ligne (souvent colonne N)
+                            data["resultat"] = valid_nums[0]
+                        elif metric == "capitaux":
+                            data["capitaux"] = valid_nums[0] # Souvent le premier colonne N
+                        
+                        data["found"] = True
+
     return data
 
+# ==============================================================================
+# 4. FONCTIONS TECH
+# ==============================================================================
 class MockLocation:
     def __init__(self, lat, lon): self.latitude = lat; self.longitude = lon
 
@@ -125,7 +160,7 @@ def get_location_safe(ville, pays):
     }
     if clean_v in fallback: return MockLocation(*fallback[clean_v])
     try:
-        ua = f"AR_V183_{randint(1000,9999)}"
+        ua = f"AR_V184_{randint(1000,9999)}"
         loc = Nominatim(user_agent=ua, timeout=5).geocode(f"{ville}, {pays}")
         if loc: return loc
     except: pass
@@ -199,13 +234,14 @@ def extract_text_from_pdfs(files):
     for f in files:
         try:
             with pdfplumber.open(f) as pdf:
-                for p in pdf.pages[:20]: t += p.extract_text() or ""
+                # Lecture étendue (40 pages) pour trouver la liasse
+                for p in pdf.pages[:40]: t += p.extract_text() or ""
                 n.append(f.name)
         except: continue
     return t, n
 
 # ==============================================================================
-# 4. ANALYSE & PDF
+# 5. ANALYSE & PDF
 # ==============================================================================
 def analyser_risque_geo(ville, pays):
     loc = get_location_safe(ville, pays)
@@ -232,7 +268,7 @@ def create_pdf(data, corpus, notes):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 20)
-    pdf.cell(0, 15, clean(f"AUDIT V18.3: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
+    pdf.cell(0, 15, clean(f"AUDIT V18.4: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
     pdf.ln(10)
     
     if data.get('lat'):
@@ -252,13 +288,10 @@ def create_pdf(data, corpus, notes):
     
     if var > 0:
         pdf.set_text_color(200, 0, 0)
-        txt_var = f"PERTE Estimee 2030: -{abs(var):,.0f} $"
-    elif var < 0:
-        pdf.set_text_color(0, 100, 0)
-        txt_var = f"GAIN / STABILITE: +{abs(var):,.0f} $"
+        txt_var = f"PERTE 2030: -{abs(var):,.0f} $"
     else:
-        pdf.set_text_color(0, 0, 0)
-        txt_var = "Impact Neutre"
+        pdf.set_text_color(0, 100, 0)
+        txt_var = "Impact Neutre / Gain"
         
     pdf.cell(60, 10, clean(txt_var), border=1)
     pdf.set_text_color(0, 0, 0)
@@ -267,7 +300,6 @@ def create_pdf(data, corpus, notes):
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, "2. CLIMAT", ln=1)
     pdf.set_font("Arial", size=11)
-    
     s24 = data.get('s2024', 2.5); s30 = data.get('s2030', 2.5)
     pdf.cell(60, 10, f"Score 2024: {s24:.2f}/5", border=1, align='C')
     pdf.cell(60, 10, f"Proj 2030: {s30:.2f}/5", border=1, align='C')
@@ -290,7 +322,7 @@ def create_pdf(data, corpus, notes):
             pdf.set_text_color(0,0,0)
             pdf.multi_cell(0, 5, clean(f"{n['summary']}"))
             pdf.ln(2)
-            
+    
     if notes:
         pdf.ln(5)
         pdf.set_font("Arial", 'I', 10)
@@ -299,7 +331,7 @@ def create_pdf(data, corpus, notes):
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
 # ==============================================================================
-# 5. INTERFACE UTILISATEUR
+# 8. INTERFACE
 # ==============================================================================
 with st.sidebar:
     st.header("⚙️ Config")
@@ -319,7 +351,7 @@ with c1:
     mode_val = st.radio("Type", ["Non Cotée", "Cotée", "Startup"])
     valeur_finale = 0.0; source_info = "Manuel"
     
-    secteur_risk = st.selectbox("Secteur (Vulnérabilité)", ["Agroalimentaire (100%)", "Industrie (70%)", "BTP (40%)", "Commerce (20%)", "Logiciel (5%)"])
+    secteur_risk = st.selectbox("Secteur", ["Agroalimentaire (100%)", "Industrie (70%)", "BTP (40%)", "Commerce (20%)", "Logiciel (5%)"])
     vuln_factor = {"Agroalimentaire": 1.0, "Industrie": 0.7, "BTP": 0.4, "Commerce": 0.2, "Logiciel": 0.05}.get(secteur_risk.split()[0], 0.5)
 
     if mode_val == "Non Cotée":
@@ -333,13 +365,15 @@ with c1:
         with col_pdf:
             uploaded_bilan = st.file_uploader("Bilan PDF", type=["pdf"], key="bilan_upload")
             if uploaded_bilan:
-                with st.spinner("OCR..."):
+                with st.spinner("Lecture OCR..."):
                     txt, _ = extract_text_from_pdfs([uploaded_bilan])
                     fin = extract_financials_from_text(txt)
-                    if fin['found']: st.session_state.pdf_financials = fin; st.success("OK")
+                    if fin['found']: st.session_state.pdf_financials = fin; st.success(f"Lu! CA: {fin['ca']:,.0f}")
+                    # DEBUG ZONE
+                    with st.expander("Voir le texte brut analysé"):
+                        st.text(txt[:3000]) # Affiche le début pour comprendre ce qu'il lit
         
         ca_val = 1000000.0; res_val = 100000.0; cap_val = 200000.0
-        
         if st.session_state.get('pdf_financials') and st.session_state.pdf_financials.get('found'):
             d = st.session_state.pdf_financials
             if d['ca']>0: ca_val=d['ca']
@@ -356,32 +390,25 @@ with c1:
         m_pme = st.selectbox("Méthode", ["Multiple CA", "Multiple EBITDA", "DCF", "Patrimonial"])
         
         val_calc = 0.0
-        # --- MULTIPLES PERSONNALISABLES ---
         if "Multiple CA" in m_pme:
             base = st.number_input("Chiffre d'Affaires (€)", value=ca_val)
-            mult_ca = st.slider("Multiple CA", 0.1, 5.0, 1.5, 0.1) # CUSTOM
+            mult_ca = st.slider("Multiple CA", 0.1, 5.0, 1.5, 0.1)
             val_calc = base * mult_ca
             source_info = f"CA x{mult_ca}"
-            
         elif "Multiple EBITDA" in m_pme:
-            # Approx EBITDA si non dispo
             def_ebitda = res_val * 1.25 if res_val > 0 else 0
             base = st.number_input("EBITDA (€)", value=def_ebitda)
-            mult_ebitda = st.slider("Multiple EBITDA", 1.0, 20.0, 7.0, 0.5) # CUSTOM
+            mult_ebitda = st.slider("Multiple EBITDA", 1.0, 20.0, 7.0, 0.5)
             val_calc = base * mult_ebitda
             source_info = f"EBITDA x{mult_ebitda}"
-            
         elif "DCF" in m_pme:
             fcf = st.number_input("Free Cash Flow (€)", value=res_val)
-            st.write("Paramètres DCF :")
             c3, c4 = st.columns(2)
-            with c3: wacc = st.number_input("WACC (%)", 1.0, 20.0, 10.0, 0.5) / 100 # CUSTOM
-            with c4: g = st.number_input("Croissance g (%)", 0.0, 10.0, 2.0, 0.1) / 100 # CUSTOM
-            
+            with c3: wacc = st.number_input("WACC (%)", 1.0, 20.0, 10.0, 0.5) / 100
+            with c4: g = st.number_input("Croissance g (%)", 0.0, 10.0, 2.0, 0.1) / 100
             if wacc > g: val_calc = fcf * (1+g) / (wacc - g)
-            else: st.error("WACC doit être > g"); val_calc = 0
+            else: val_calc = 0
             source_info = f"DCF (WACC {wacc*100}%)"
-            
         else:
             val_calc = st.number_input("Capitaux Propres", value=cap_val)
             source_info = "Actif Net"
