@@ -33,11 +33,9 @@ def init_session():
         'lat': 48.8566, 'lon': 2.3522,
         'climat_calcule': False,
         'map_id': 0,
-        # Risques 360 (Nouveaux Inputs)
-        'vol_eau': 50000.0,
-        'prix_eau': 4.5,
-        'part_fournisseur_risk': 30.0,
-        'energie_conso': 100000.0,
+        # Risques 360
+        'vol_eau': 50000.0, 'prix_eau': 4.5,
+        'part_fournisseur_risk': 30.0, 'energie_conso': 100000.0,
         'reut_invest': False,
         # Docs
         'news': [], 'wiki_summary': "Pas de données.",
@@ -45,7 +43,7 @@ def init_session():
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
 
-# --- SECTEURS & PARAMETRES ---
+# --- SECTEURS & CONSTANTES ---
 SECTEURS = {
     "Agroalimentaire (100%)": 1.0, "Mines & Métaux (90%)": 0.9,
     "Chimie (85%)": 0.85, "Industrie (80%)": 0.8,
@@ -56,44 +54,45 @@ SECTEURS = {
 SECTEURS_LISTE = list(SECTEURS.keys())
 HEADERS = {'User-Agent': 'AquaRisk/1.0'}
 
-# --- MOTEUR RISQUES 360 (NOUVEAU) ---
+# --- CALCUL CLIMAT DYNAMIQUE (C'était la fonction manquante !) ---
+def calculate_dynamic_score(lat, lon):
+    # Score basé sur la latitude + variation pseudo-aléatoire stable
+    base = 2.0 + (abs(lat) / 60.0)
+    random.seed(int(lat*100) + int(lon*100))
+    noise = random.uniform(-0.3, 0.8)
+    s24 = min(max(base + noise, 1.5), 4.2)
+    s30 = min(s24 * 1.2, 5.0)
+    return s24, s30
+
+# --- CALCUL RISQUES 360 ---
 def calculate_360_risks(data, params):
     risks = {}
-    
-    # 1. Opérationnel (Prix de l'eau)
+    # 1. Opérationnel
     delta_prix = data['prix_eau'] * (params['hausse_eau_pct'] / 100.0)
     risks['Coût Eau (Opérationnel)'] = data['vol_eau'] * delta_prix
-
-    # 2. Supply Chain (Fournisseurs)
-    # Hypothèse: Achats = 40% du CA
+    # 2. Supply Chain
     achats = data['ca'] * 0.40 
     part_exposee = achats * (data['part_fournisseur_risk'] / 100.0)
     risks['Supply Chain (Rupture)'] = part_exposee * (params['impact_geopolitique'] / 100.0)
-
-    # 3. Réglementaire (REUT vs Taxes)
+    # 3. Réglementaire
     if not data['reut_invest']:
-        # Coût théorique mise aux normes
         vol_jour = data['vol_eau'] / 300
         capex_reut = vol_jour * 1500 
         risks['Réglementaire (Mise aux normes)'] = capex_reut * (params['pression_legale'] / 100.0)
     else:
         risks['Réglementaire (Mise aux normes)'] = 0.0
-
-    # 4. Image & Réputation (Impact Valo)
+    # 4. Image
     risks['Réputation (Boycott)'] = data['valo_finale'] * (params['risque_image'] / 100.0)
-
-    # 5. Énergie (Corrélation Eau-Energie)
-    # Hypothèse: 15% de l'énergie sert à pomper/chauffer l'eau
+    # 5. Énergie
     risks['Surcoût Énergie'] = (data['energie_conso'] * 0.15) * (params['hausse_energie'] / 100.0)
 
     total_risk = sum(risks.values())
     return risks, total_risk
 
 def calculate_water_footprint(data):
-    # Blue Water (Direct) + Grey Water (Indirect estimé)
     return data['vol_eau'] + (data['ca'] * 0.02)
 
-# --- APIS EXISTANTES ---
+# --- APIS (PAPPERS / YAHOO) ---
 def get_pappers_data(query, api_key):
     if not api_key: return None, "Clé manquante"
     try:
@@ -113,26 +112,18 @@ def get_pappers_data(query, api_key):
         return stats, d.get('nom_entreprise', 'Inconnu')
     except Exception as e: return None, str(e)
 
-# --- YAHOO FINANCE (CORRECTIF POUR EVITER LE CRASH) ---
 def get_yahoo_data(ticker):
     try:
         t = yf.Ticker(ticker)
-        # On force la récupération du nom pour vérifier l'existence
-        try:
-            name = t.info.get('longName')
+        try: name = t.info.get('longName')
         except: name = None
-
-        if not name and not ticker.endswith(".PA"):
-            return get_yahoo_data(ticker + ".PA")
-        
+        if not name and not ticker.endswith(".PA"): return get_yahoo_data(ticker + ".PA")
         mcap = t.info.get('marketCap') or t.fast_info.get('market_cap')
         sector = t.info.get('sector', 'N/A')
-        
-        # ON RENVOIE 4 VALEURS OBLIGATOIREMENT
         return float(mcap or 0), name, sector, ticker
-    except: 
-        return 0.0, None, None, None
+    except: return 0.0, None, None, None
 
+# --- OCR ---
 def run_ocr_scan(file_obj):
     stats = {'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'found': False}
     try:
@@ -155,6 +146,7 @@ def run_ocr_scan(file_obj):
     except: pass
     return stats, "OK" if stats['found'] else "Rien trouvé"
 
+# --- WIKI ---
 def get_wiki_summary(name):
     try:
         clean = re.sub(r'\s(SA|SAS|SARL|INC)', '', name, re.IGNORECASE).strip()
@@ -165,9 +157,8 @@ def get_wiki_summary(name):
         return r.json().get('extract', "Pas de résumé.")
     except: return "Erreur Wiki."
 
-# --- PDF 360 ---
+# --- PDF GENERATOR ---
 def generate_pdf_report(data):
-    # (Version simplifiée pour éviter les erreurs d'image si matplotlib plante)
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 20); pdf.cell(0, 20, "RAPPORT D'AUDIT 360", ln=1, align='C')
@@ -182,4 +173,13 @@ def generate_pdf_report(data):
     pdf.ln(10)
     pdf.multi_cell(0, 5, f"Resume:\n{str(data.get('wiki_summary',''))[:2000]}")
     return pdf.output(dest='S').encode('latin-1', 'replace')
+
+def generate_excel(data):
+    output = io.BytesIO()
+    wb = xlsxwriter.Workbook(output, {'in_memory': True})
+    ws = wb.add_worksheet()
+    rows = [["Entité", data.get('ent_name')], ["Valo", data.get('valo_finale')], ["VaR", data.get('var_amount')]]
+    for i, r in enumerate(rows): ws.write_row(i, 0, r)
+    wb.close()
+    return output.getvalue()
     
