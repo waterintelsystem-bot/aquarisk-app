@@ -11,8 +11,9 @@ import feedparser
 import xlsxwriter
 import matplotlib.pyplot as plt
 import matplotlib
-import tempfile # <--- NOUVEAU : Pour gérer les images PDF sans crash
+import tempfile
 import os
+import random
 
 matplotlib.use('Agg')
 
@@ -23,16 +24,13 @@ def init_session():
         'siren': "",
         'ville': "Paris", 'pays': "France",
         'secteur': "Agroalimentaire (100%)",
-        
         # Finance
         'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'fcf': 0.0,
         'valo_finale': 0.0, 'mode_valo': "PME (Bilan)", 'source_data': "Manuel",
-        
         # Climat
         's24': 2.5, 's30': 3.0, 'var_amount': 0.0,
         'lat': 48.8566, 'lon': 2.3522,
         'climat_calcule': False,
-        
         # Docs
         'news': [], 'wiki_summary': "Pas de données.",
     }
@@ -50,18 +48,34 @@ SECTEURS = {
 }
 SECTEURS_LISTE = list(SECTEURS.keys())
 
-# --- API EXTERNES (PAPPERS / YAHOO) ---
+# --- HEADER SECURISE (POUR NE PAS ETRE BLOQUE) ---
+HEADERS = {'User-Agent': 'AquaRisk/1.0 (Educational Project)'}
+
+# --- FONCTION CLIMAT DYNAMIQUE ---
+def calculate_dynamic_score(lat, lon):
+    """Génère un score qui change VRAIMENT selon la position GPS"""
+    # Plus on est proche de l'équateur (lat 0), plus le risque est théoriquement élevé
+    base_risk = 2.0 + (abs(lat) / 90.0) * 1.5 
+    # Ajout d'aléatoire stable basé sur le nom de la ville (pour simulation)
+    random.seed(lat+lon)
+    variation = random.uniform(-0.5, 1.5)
+    
+    s24 = min(max(base_risk + variation, 1.0), 4.0)
+    s30 = min(max(s24 * 1.25, 1.5), 5.0) # Projection +25%
+    return s24, s30
+
+# --- API EXTERNES ---
 def get_pappers_data(query, api_key):
     if not api_key: return None, "Clé API manquante."
     try:
         if re.fullmatch(r'\d{9}', query.replace(' ', '')):
             url = f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={query.replace(' ', '')}"
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, headers=HEADERS, timeout=5)
         else:
-            r = requests.get("https://api.pappers.fr/v2/recherche", params={"q": query, "api_token": api_key, "par_page": 1}, timeout=5)
+            r = requests.get("https://api.pappers.fr/v2/recherche", params={"q": query, "api_token": api_key, "par_page": 1}, headers=HEADERS, timeout=5)
             if r.status_code == 200 and r.json().get('resultats'):
                 siren = r.json()['resultats'][0]['siren']
-                r = requests.get(f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={siren}", timeout=5)
+                r = requests.get(f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={siren}", headers=HEADERS, timeout=5)
         
         if r.status_code != 200: return None, "Introuvable"
         d = r.json()
@@ -78,15 +92,6 @@ def get_yahoo_data(ticker):
         return float(mcap), t.info.get('longName'), t.info.get('sector', 'N/A'), ticker
     except: return 0.0, None, None, None
 
-# --- OCR ---
-def clean_number(text_num):
-    if not isinstance(text_num, str): return 0.0
-    try:
-        clean = re.sub(r'[^\d,\.-]', '', text_num.replace(' ', '')).replace(',', '.')
-        if clean.count('.') > 1: clean = clean.replace('.', '', clean.count('.') - 1)
-        return float(clean)
-    except: return 0.0
-
 def run_ocr_scan(file_obj):
     stats = {'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'found': False}
     try:
@@ -96,11 +101,15 @@ def run_ocr_scan(file_obj):
         text = full_text.upper()
         patterns = {'ca': ["CHIFFRES D'AFFAIRES", "VENTES"], 'res': ["RESULTAT NET", "BENEFICE"], 'cap': ["CAPITAUX PROPRES"]}
         
+        def clean_n(s):
+            try: return float(re.sub(r'[^\d,\.-]', '', s.replace(' ', '')).replace(',', '.'))
+            except: return 0.0
+
         for k, words in patterns.items():
             for w in words:
                 if w in text:
                     nums = re.findall(r'-?\s*(?:\d{1,3}(?:\s\d{3})*|\d+)(?:[\.,]\d+)?', text[text.find(w):text.find(w)+400])
-                    valid = [clean_number(n) for n in nums if abs(clean_number(n)) > 1000 and abs(clean_number(n)) < 2030 or abs(clean_number(n)) > 2050]
+                    valid = [clean_n(n) for n in nums if abs(clean_n(n)) > 1000 and abs(clean_n(n)) < 2030 or abs(clean_n(n)) > 2050]
                     if valid:
                         stats[k] = max(valid, key=abs) if k == 'ca' else valid[0]
                         stats['found'] = True
@@ -108,17 +117,29 @@ def run_ocr_scan(file_obj):
     except Exception as e: return stats, str(e)
     return stats, "OK"
 
+# --- WIKIPEDIA (DÉBLOQUÉ) ---
 def get_wiki_summary(name):
     try:
         import urllib.parse
-        clean = re.sub(r'\s(SA|SAS|SARL|INC)', '', name, flags=re.IGNORECASE).strip()
-        r = requests.get(f"https://fr.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(clean)}", timeout=3)
-        return r.json().get('extract', "Pas de résumé.") if r.status_code == 200 else "Introuvable."
-    except: return "Erreur Wiki."
+        # On nettoie le nom pour augmenter les chances
+        clean = re.sub(r'\s(SA|SAS|SARL|INC|LTD|GROUP|GROUPE)', '', name, flags=re.IGNORECASE).strip()
+        url = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(clean)}"
+        # L'ajout du USER-AGENT est crucial ici
+        r = requests.get(url, headers=HEADERS, timeout=3)
+        if r.status_code == 200:
+            return r.json().get('extract', "Pas de résumé.")
+        else:
+            # Fallback en anglais si FR échoue
+            url_en = f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(clean)}"
+            r_en = requests.get(url_en, headers=HEADERS, timeout=3)
+            if r_en.status_code == 200: return r_en.json().get('extract', "Not found.")
+            
+        return f"Introuvable (Code {r.status_code})"
+    except Exception as e: return f"Erreur Wiki: {str(e)}"
 
-# --- GENERATEUR PDF ROBUSTE (AVEC TEMPFILE) ---
+# --- GENERATEUR PDF ---
 def generate_pdf_report(data):
-    # 1. Création Graphique Temporaire
+    # Graphique
     temp_chart_path = None
     try:
         fig, ax = plt.subplots(figsize=(6, 3))
@@ -127,59 +148,54 @@ def generate_pdf_report(data):
         ax.plot(years, scores, marker='o', color='red', linestyle='-', linewidth=2)
         ax.set_title('Trajectoire Risque Eau')
         ax.set_ylim(0, 5)
-        ax.grid(True, linestyle='--', alpha=0.6)
-        
-        # SAUVEGARDE DANS UN FICHIER TEMPORAIRE PHYSIQUE (Pas en mémoire RAM)
+        ax.grid(True)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             plt.savefig(tmp.name, format='png', dpi=100)
             temp_chart_path = tmp.name
         plt.close(fig)
     except: pass
 
-    # 2. PDF
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 22)
     pdf.cell(0, 20, "RAPPORT D'AUDIT", ln=1, align='C')
+    
+    # Identité
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(0, 10, str(data.get('ent_name', 'Société')).upper(), ln=1, align='C')
+    pdf.ln(5)
+    pdf.set_font("Arial", 'I', 10)
+    pdf.cell(0, 10, f"Secteur: {data.get('secteur', 'N/A')}", ln=1, align='C')
     pdf.ln(10)
     
     # Finance
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "1. FINANCE", ln=1)
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "1. FINANCE", ln=1)
     pdf.set_font("Arial", '', 11)
     pdf.cell(0, 8, f"Valorisation: {data.get('valo_finale', 0):,.0f} EUR", ln=1)
-    pdf.cell(0, 8, f"CA: {data.get('ca', 0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Chiffre d'Affaires: {data.get('ca', 0):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Resultat Net: {data.get('res', 0):,.0f} EUR", ln=1)
     pdf.ln(5)
     
     # Climat
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "2. CLIMAT & RISQUE", ln=1)
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "2. CLIMAT", ln=1)
     pdf.set_font("Arial", '', 11)
-    pdf.cell(0, 8, f"Score Risque 2030: {data.get('s30', 0):.2f} / 5", ln=1)
-    pdf.cell(0, 8, f"VaR (Impact): -{abs(data.get('var_amount', 0)):,.0f} EUR", ln=1)
-    pdf.ln(5)
+    pdf.cell(0, 8, f"Ville: {data.get('ville', '?')} ({data.get('pays', '?')})", ln=1)
+    pdf.cell(0, 8, f"Risque 2030: {data.get('s30', 0):.2f} / 5", ln=1)
+    pdf.cell(0, 8, f"VaR: -{abs(data.get('var_amount', 0)):,.0f} EUR", ln=1)
     
-    # Image Graphique
     if temp_chart_path and os.path.exists(temp_chart_path):
-        try:
-            pdf.image(temp_chart_path, x=50, w=100)
+        try: pdf.image(temp_chart_path, x=50, w=100)
         except: pass
-        
-    # Nettoyage fichier temporaire
-    if temp_chart_path and os.path.exists(temp_chart_path):
         try: os.remove(temp_chart_path)
         except: pass
 
-    # Texte Wiki (Encodage safe)
-    pdf.ln(5)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "3. CONTEXTE", ln=1)
+    # Contexte
+    pdf.ln(10)
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "3. CONTEXTE", ln=1)
     pdf.set_font("Arial", '', 10)
     wiki = str(data.get('wiki_summary', ''))
     try: wiki = wiki.encode('latin-1', 'replace').decode('latin-1')
-    except: wiki = "Erreur encodage."
+    except: wiki = "Texte non encodable."
     pdf.multi_cell(0, 5, wiki)
 
     return pdf.output(dest='S').encode('latin-1', 'replace')
