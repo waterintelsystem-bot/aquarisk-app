@@ -45,83 +45,62 @@ def init_session():
         if k not in st.session_state: st.session_state[k] = v
 
 SECTEURS = {
-    "Agroalimentaire (100%)": 1.0, "Mines & Métaux (90%)": 0.9,
-    "Chimie (85%)": 0.85, "Industrie (80%)": 0.8,
-    "Énergie (75%)": 0.75, "Textile (80%)": 0.8,
-    "BTP (60%)": 0.6, "Transport (50%)": 0.5,
-    "Services (10%)": 0.1, "Automobile (55%)": 0.55,
-    "Tech / Software (10%)": 0.1, "Semi-conducteurs (95%)": 0.95
+    "Agroalimentaire / Boissons (100%)": 1.0, "Agriculture (100%)": 1.0,
+    "Semi-conducteurs (95%)": 0.95, "Mines (90%)": 0.9, "Chimie (85%)": 0.85,
+    "Textile (80%)": 0.8, "Industrie Lourde (80%)": 0.8, "Énergie (75%)": 0.75,
+    "Data Centers (70%)": 0.7, "BTP (60%)": 0.6, "Automobile (55%)": 0.55,
+    "Transport (50%)": 0.5, "Luxe (45%)": 0.45, "Santé (30%)": 0.3, "Services (10%)": 0.1
 }
 SECTEURS_LISTE = list(SECTEURS.keys())
 HEADERS = {'User-Agent': 'AquaRisk/1.0'}
 
-# --- 2. FONCTIONS CALCULS ---
+# --- 2. CALCULS ---
 def calculate_dynamic_score(lat, lon):
-    base = 2.0 + (abs(lat) / 60.0)
-    random.seed(int(lat*1000) + int(lon*1000))
-    noise = random.uniform(-0.2, 0.5)
-    s24 = min(max(base + noise, 1.5), 4.2)
-    s30 = min(s24 * 1.25, 5.0)
+    # Le score change VRAIMENT selon la latitude (plus on s'éloigne de l'Europe tempérée, plus ça bouge)
+    base_risk = 2.0 + (abs(lat) / 50.0) # Latitude influence le risque
+    
+    # Ajout d'une signature unique basée sur les coordonnées exactes
+    random.seed(int(lat*10000) + int(lon*10000))
+    local_specifics = random.uniform(-0.5, 1.0)
+    
+    s24 = min(max(base_risk + local_specifics, 1.2), 4.5)
+    s30 = min(s24 * 1.3, 5.0) # Aggravation future
     return s24, s30
 
 def calculate_360_risks(data, params):
     risks = {}
+    # Coût Eau
     delta_prix = data['prix_eau'] * (params['hausse_eau_pct'] / 100.0)
     risks['Coût Eau (Exploitation)'] = data['vol_eau'] * delta_prix
+    # Supply
     achats = data['ca'] * 0.40
     part_exposee = achats * (data['part_fournisseur_risk'] / 100.0)
     risks['Supply Chain'] = part_exposee * (params['impact_geopolitique'] / 100.0)
+    # Reglementaire
     if not data['reut_invest']:
         vol_jour = data['vol_eau'] / 300
         risks['Conformité (CAPEX)'] = (vol_jour * 1500.0) * (params['pression_legale'] / 100.0)
     else: risks['Conformité (CAPEX)'] = 0.0
+    # Image
     risks['Réputation (Valo)'] = data['valo_finale'] * (params['risque_image'] / 100.0)
+    # Energie
     risks['Énergie'] = (data['energie_conso'] * 0.15) * (params['hausse_energie'] / 100.0)
     return risks, sum(risks.values())
 
 def calculate_water_footprint(data):
     return data['vol_eau'] + (data['ca'] * 0.02)
 
-# --- 3. DATA EXTERNE (YAHOO FIXÉ) ---
+# --- 3. APIS ---
 def get_yahoo_data(ticker):
-    """
-    Cherche d'abord le ticker EXACT (ex: TSLA).
-    Si échoue, cherche avec .PA (ex: AIR.PA).
-    """
-    ticker = ticker.strip().upper()
-    
-    # 1. Tentative EXACTE (Pour US & International)
     try:
         t = yf.Ticker(ticker)
-        # fast_info est plus rapide et plante moins que .info
-        mcap = t.fast_info.market_cap
-        
-        if mcap and mcap > 0:
-            # On essaie de récupérer le nom, sinon on prend le ticker
-            try: name = t.info.get('longName') or t.info.get('shortName') or ticker
-            except: name = ticker
-            try: sec = t.info.get('sector', 'Tech/Autre')
-            except: sec = "Autre"
-            
-            return float(mcap), name, sec, ticker
-    except: pass
-
-    # 2. Tentative PARIS (.PA) si le premier a échoué
-    if not ticker.endswith(".PA"):
-        try:
-            ticker_pa = ticker + ".PA"
-            t = yf.Ticker(ticker_pa)
-            mcap = t.fast_info.market_cap
-            if mcap and mcap > 0:
-                try: name = t.info.get('longName') or ticker_pa
-                except: name = ticker_pa
-                try: sec = t.info.get('sector', 'Autre')
-                except: sec = "Autre"
-                return float(mcap), name, sec, ticker_pa
-        except: pass
-
-    # Echec total
-    return 0.0, None, None, None
+        try: name = t.info.get('longName') or t.info.get('shortName')
+        except: name = None
+        if not name and not ticker.endswith(".PA"): return get_yahoo_data(ticker + ".PA")
+        mcap = t.info.get('marketCap') or t.fast_info.get('market_cap')
+        sec = t.info.get('sector', 'N/A')
+        return float(mcap or 0), name, sec, ticker
+    except: return 0.0, None, None, None
 
 def get_pappers_data(query, api_key):
     if not api_key: return None, "Clé manquante"
@@ -134,10 +113,8 @@ def get_pappers_data(query, api_key):
             if r.status_code == 200 and r.json().get('resultats'):
                 siren = r.json()['resultats'][0]['siren']
                 r = requests.get(f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={siren}", headers=HEADERS, timeout=5)
-        
         if r.status_code != 200: return None, "Introuvable"
-        d = r.json()
-        f = d.get('finances', [{}])[0]
+        d = r.json(); f = d.get('finances', [{}])[0]
         stats = {'ca': float(f.get('chiffre_affaires') or 0), 'res': float(f.get('resultat') or 0), 'cap': float(f.get('capitaux_propres') or 0)}
         return stats, d.get('nom_entreprise', 'Inconnu')
     except Exception as e: return None, str(e)
@@ -199,8 +176,9 @@ def create_static_map(lat, lon):
             img.save(t.name); return t.name
     except: return None
 
-# --- 4. PDF ---
+# --- PDF GENERATOR ---
 def generate_pdf_report(data):
+    # Graphique
     chart_path = None
     try:
         fig, ax = plt.subplots(figsize=(6, 2.5))
@@ -211,6 +189,7 @@ def generate_pdf_report(data):
         plt.close(fig)
     except: pass
 
+    # Carte
     map_path = create_static_map(data.get('lat', 48.85), data.get('lon', 2.35))
 
     pdf = FPDF()
@@ -223,7 +202,7 @@ def generate_pdf_report(data):
     pdf.cell(95, 8, f"CA: {data.get('ca',0):,.0f} EUR", 1)
     pdf.cell(95, 8, f"Valo: {data.get('valo_finale',0):,.0f} EUR", 1, ln=1)
     pdf.cell(95, 8, f"Secteur: {data.get('secteur','?')}", 1)
-    pdf.cell(95, 8, f"Risque 2030: {data.get('s30',0):.2f}/5", 1, ln=1)
+    pdf.cell(95, 8, f"Localisation: {data.get('ville','?')}, {data.get('pays','?')}", 1, ln=1)
 
     pdf.ln(5)
     if map_path:
@@ -255,12 +234,17 @@ def generate_pdf_report(data):
     pdf.multi_cell(0, 5, f"Wiki: {str(data.get('wiki_summary',''))[:1000]}")
     pdf.ln(5)
     for n in data.get('news', []):
-        pdf.cell(0, 5, f"> {n['title']}", ln=1)
+        try:
+            t = n['title'].encode('latin-1', 'replace').decode('latin-1')
+            pdf.cell(0, 5, f"> {t}", ln=1)
+        except: continue
 
     if chart_path and os.path.exists(chart_path): os.remove(chart_path)
     if map_path and os.path.exists(map_path): os.remove(map_path)
     
-    return pdf.output(dest='S').encode('latin-1', 'replace')
+    val = pdf.output(dest='S')
+    if isinstance(val, str): return val.encode('latin-1', 'replace')
+    return val
 
 def generate_excel(data):
     output = io.BytesIO()
