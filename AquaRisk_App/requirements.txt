@@ -1,0 +1,11 @@
+streamlit
+pandas
+pdfplumber
+fpdf
+yfinance
+folium
+streamlit-folium
+feedparser
+xlsxwriter
+thefuzz
+geopy
