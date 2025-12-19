@@ -1,105 +1,96 @@
 import streamlit as st
 import utils
 
-# --- OBLIGATOIRE : EVITE LE CRASH DE LA MEMOIRE ---
 utils.init_session()
+st.title("💰 Finance & Identité")
 
-st.title("💰 Module Financier & Identité")
-
-# 1. IDENTITÉ
-st.markdown("### 1. Identité de la Cible")
+# --- IDENTITE ---
 c1, c2 = st.columns(2)
-with c1: 
-    # Utilisation safe de la clé 'ent_name'
-    st.session_state['ent_name'] = st.text_input("Nom de l'entreprise", st.session_state['ent_name'])
+with c1: st.session_state['ent_name'] = st.text_input("Entreprise", st.session_state['ent_name'])
 with c2: 
-    secteur_choix = st.selectbox("Secteur d'Activité", utils.SECTEURS_LISTE, index=0)
-    st.session_state['secteur'] = secteur_choix
+    secteur_list = [
+        "Agroalimentaire (100%)", "Industrie (80%)", "Énergie (70%)", 
+        "BTP (60%)", "Transport (50%)", "Commerce (40%)", "Services (10%)"
+    ]
+    st.session_state['secteur'] = st.selectbox("Secteur", secteur_list)
 
-st.markdown("---")
+st.divider()
 
-# 2. VALORISATION
-st.markdown("### 2. Étude Financière")
-mode = st.radio("Type d'Entreprise", ["PME (Bilan)", "Cotée (Bourse)", "Startup (Levée)"], horizontal=True)
+# --- TYPE D'AUDIT ---
+mode = st.radio("Mode", ["PME (Bilan)", "Cotée (Bourse)", "Startup"], horizontal=True)
 st.session_state['mode_valo'] = mode
 
 if mode == "PME (Bilan)":
-    # ZONE IMPORT (OCR + PAPPERS)
-    col_pdf, col_pappers = st.columns(2)
+    t1, t2 = st.tabs(["📄 OCR PDF", "🔍 API Pappers"])
     
-    with col_pdf:
-        uploaded = st.file_uploader("Importer Liasse Fiscale (PDF)", type=["pdf"])
-        if uploaded and st.button("🧠 Analyser PDF"):
-            with st.spinner("OCR en cours..."):
-                stats, txt = utils.run_ocr_scan(uploaded)
+    with t1:
+        uploaded = st.file_uploader("Bilan PDF", type=["pdf"])
+        if uploaded and st.button("Lancer OCR"):
+            with st.spinner("Lecture..."):
+                stats, msg = utils.run_ocr_scan(uploaded)
                 if stats['found']:
                     st.session_state['ca'] = stats['ca']
                     st.session_state['res'] = stats['res']
                     st.session_state['cap'] = stats['cap']
                     st.session_state['source_data'] = "OCR PDF"
-                    st.success("Données extraites !")
-                else: st.warning("OCR échoué.")
-    
-    with col_pappers:
-        pappers_key = st.text_input("Clé API Pappers", type="password")
-        if st.button("🔍 Recherche Pappers"):
-            stats, nom = utils.get_pappers_data(st.session_state['ent_name'], pappers_key)
-            if stats:
-                st.session_state['ca'] = stats['ca']
-                st.session_state['res'] = stats['res']
-                st.session_state['cap'] = stats['cap']
-                st.session_state['ent_name'] = nom
-                st.session_state['source_data'] = "API Pappers"
-                st.success(f"Trouvé : {nom}")
-            else: st.error(f"Erreur: {nom}")
+                    st.success(f"Trouvé! CA: {stats['ca']:,.0f}")
+                else: st.error(f"Echec OCR: {msg}")
 
-    # CHAMPS (Toujours affichés)
-    c_ca, c_res, c_cap = st.columns(3)
-    with c_ca: st.session_state['ca'] = st.number_input("Chiffre d'Affaires (€)", value=st.session_state['ca'])
-    with c_res: st.session_state['res'] = st.number_input("Résultat Net (€)", value=st.session_state['res'])
-    with c_cap: st.session_state['cap'] = st.number_input("Capitaux Propres (€)", value=st.session_state['cap'])
-    
-    methode = st.selectbox("Méthode", ["Multiple CA", "Multiple EBITDA", "Patrimonial", "DCF Simplifié"])
-    
-    val_calc = 0.0
-    if methode == "Multiple CA":
-        mult = st.slider("Multiple CA", 0.5, 6.0, 1.5, 0.1)
-        val_calc = st.session_state['ca'] * mult
-    elif methode == "Multiple EBITDA":
-        ebitda = st.session_state['res'] * 1.3 
-        mult = st.slider("Multiple EBITDA", 3.0, 20.0, 7.0, 0.5)
-        val_calc = ebitda * mult
-    elif methode == "Patrimonial":
-        val_calc = st.session_state['cap']
-    else: val_calc = st.session_state['res'] * 10 
+    with t2:
+        pk = st.text_input("Clé API Pappers", value=st.session_state.get('pappers_token', ''), type="password")
+        if st.button("Chercher sur Pappers"):
+            if pk:
+                st.session_state['pappers_token'] = pk # Save token
+                stats, nom = utils.get_pappers_data(st.session_state['ent_name'], pk)
+                if stats:
+                    st.session_state['ca'] = stats['ca']
+                    st.session_state['res'] = stats['res']
+                    st.session_state['cap'] = stats['cap']
+                    st.session_state['ent_name'] = nom
+                    st.session_state['source_data'] = "API Pappers"
+                    st.success(f"Données importées pour {nom}")
+                else: st.error("Erreur Pappers (Vérifiez la clé ou le nom)")
+            else: st.warning("Entrez une clé API.")
 
-    st.session_state['valo_finale'] = val_calc
+    # CHAMPS MANUELS (S'affichent toujours)
+    st.markdown("#### Données Financières (Modifiables)")
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1: st.session_state['ca'] = st.number_input("CA (€)", value=st.session_state['ca'])
+    with col_f2: st.session_state['res'] = st.number_input("Résultat (€)", value=st.session_state['res'])
+    with col_f3: st.session_state['cap'] = st.number_input("Capitaux (€)", value=st.session_state['cap'])
+
+    meth = st.selectbox("Méthode", ["Multiple CA", "Multiple EBITDA", "Patrimonial"])
+    if meth == "Multiple CA":
+        m = st.slider("Coeff", 0.1, 5.0, 1.0)
+        st.session_state['valo_finale'] = st.session_state['ca'] * m
+    elif meth == "Multiple EBITDA":
+        ebitda = st.session_state['res'] * 1.3
+        m = st.slider("Coeff", 2.0, 15.0, 7.0)
+        st.session_state['valo_finale'] = ebitda * m
+    else: st.session_state['valo_finale'] = st.session_state['cap']
 
 elif mode == "Cotée (Bourse)":
-    ticker = st.text_input("Ticker Yahoo (ex: BN.PA)", "BN.PA")
-    if st.button("🔍 Rechercher Ticker"):
-        mcap, name, sec = utils.get_yahoo_data(ticker)
-        if mcap > 0:
-            st.session_state['valo_finale'] = mcap
-            if name: st.session_state['ent_name'] = name
-            st.session_state['source_data'] = f"Yahoo ({ticker})"
-            st.session_state['ca'] = mcap * 0.5 # Est.
-            st.success(f"Trouvé : {name} | Valo : {mcap:,.0f}€")
+    tick = st.text_input("Ticker (ex: BN.PA)", "BN.PA")
+    if st.button("Chercher Ticker"):
+        val, nom, sec, full_t = utils.get_yahoo_data(tick)
+        if val > 0:
+            st.session_state['valo_finale'] = val
+            st.session_state['ent_name'] = nom
+            st.session_state['source_data'] = f"Yahoo {full_t}"
+            # Est. ratios
+            st.session_state['ca'] = val * 0.5
+            st.session_state['res'] = val * 0.05
+            st.success(f"Trouvé: {nom} ({val:,.0f}€)")
         else: st.error("Ticker introuvable.")
-    st.number_input("Capitalisation Boursière (€)", key="valo_finale")
+    st.metric("Valo Bourse", f"{st.session_state['valo_finale']:,.0f} €")
 
 else: # Startup
     stade = st.selectbox("Stade", ["Pre-Seed", "Seed", "Series A", "Series B"])
-    ranges = {"Pre-Seed": (1e6, 2e6), "Seed": (3e6, 8e6), "Series A": (10e6, 30e6), "Series B": (40e6, 80e6)}
-    mini, maxi = ranges[stade.split()[0]]
-    val_calc = st.slider("Valorisation (€)", mini, maxi, (mini+maxi)/2)
-    st.session_state['valo_finale'] = val_calc
+    ranges = {"Pre-Seed": 1.5e6, "Seed": 5e6, "Series A": 15e6, "Series B": 50e6}
+    st.session_state['valo_finale'] = st.slider("Valo", 500000.0, 100000000.0, ranges[stade.split()[0]])
 
-st.markdown("---")
-col_v1, col_v2 = st.columns([2, 1])
-with col_v1: st.info(f"Valorisation calculée : {st.session_state['valo_finale']:,.0f} €")
-with col_v2:
-    if st.button("✅ VALIDER L'ÉTUDE", type="primary"):
-        st.session_state['audit_launched'] = True
-        st.success("Validé ! Passez à l'onglet Climat.")
-        
+st.divider()
+st.info(f"Valorisation Retenue : {st.session_state['valo_finale']:,.0f} €")
+if st.button("✅ Valider Finance", type="primary"):
+    st.success("Données financières figées. Allez dans Climat.")
+    
