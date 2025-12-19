@@ -7,7 +7,7 @@ from fpdf import FPDF
 from datetime import datetime
 import io
 import requests
-import feedparser
+import feedparser # INDISPENSABLE POUR LES NEWS
 import xlsxwriter
 import matplotlib.pyplot as plt
 import matplotlib
@@ -15,27 +15,33 @@ import tempfile
 import os
 import random
 import urllib.parse
-from staticmap import StaticMap, CircleMarker # NOUVEAU POUR LE PDF
+from staticmap import StaticMap, CircleMarker
 
 matplotlib.use('Agg')
 
-# --- INITIALISATION MEMOIRE ---
+# --- INIT MEMOIRE ---
 def init_session():
     defaults = {
         'ent_name': "Nouvelle Entreprise",
         'siren': "",
         'ville': "Paris", 'pays': "France",
         'secteur': "Agroalimentaire (100%)",
+        # Finance
         'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'fcf': 0.0,
         'valo_finale': 0.0, 'mode_valo': "PME (Bilan)", 'source_data': "Manuel",
+        # Climat
         's24': 2.5, 's30': 3.0, 'var_amount': 0.0,
         'lat': 48.8566, 'lon': 2.3522,
         'climat_calcule': False,
         'map_id': 0,
+        # Risques 360
         'vol_eau': 50000.0, 'prix_eau': 4.5,
         'part_fournisseur_risk': 30.0, 'energie_conso': 100000.0,
         'reut_invest': False,
-        'news': [], 'wiki_summary': "Pas de données.",
+        # DATA EXTERNE (NOUVEAU)
+        'news': [], 
+        'wiki_summary': "Pas de données.",
+        'weather_info': "Pas de données météo.",
     }
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
@@ -140,23 +146,75 @@ def get_wiki_summary(name):
         return r.json().get('extract', "Pas de résumé.")
     except: return "Erreur Wiki."
 
-# --- NOUVEAU : GENERATEUR IMAGE CARTE STATIQUE ---
+# --- NOUVEAU : GOOGLE NEWS (RSS) ---
+def get_company_news(name):
+    """Récupère les 5 derniers articles via Google News RSS"""
+    news_items = []
+    try:
+        # Nettoyage du nom pour la recherche
+        clean_name = re.sub(r'\s(SA|SAS|SARL|INC)', '', name, flags=re.IGNORECASE).strip()
+        # Encodage URL
+        query = urllib.parse.quote(f'"{clean_name}" (finance OR business OR climat)')
+        # URL RSS Google News (Marche sans clé API)
+        rss_url = f"https://news.google.com/rss/search?q={query}&hl=fr&gl=FR&ceid=FR:fr"
+        
+        feed = feedparser.parse(rss_url)
+        for entry in feed.entries[:5]:
+            news_items.append({
+                "title": entry.title,
+                "link": entry.link,
+                "published": entry.published if 'published' in entry else "Date inconnue"
+            })
+    except Exception as e:
+        news_items.append({"title": f"Erreur News: {str(e)}", "link": "#", "published": ""})
+    
+    return news_items
+
+# --- NOUVEAU : METEO REELLE (Open-Meteo) ---
+def get_weather_data(lat, lon):
+    """Récupère la météo actuelle et prévisions via Open-Meteo (Gratuit)"""
+    try:
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current_weather": "true",
+            "daily": "temperature_2m_max,precipitation_sum",
+            "timezone": "auto"
+        }
+        r = requests.get(url, params=params, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            curr = data.get('current_weather', {})
+            daily = data.get('daily', {})
+            
+            info = {
+                "temp": curr.get('temperature', 0),
+                "wind": curr.get('windspeed', 0),
+                "code": curr.get('weathercode', 0),
+                # Prévisions J+3
+                "forecast": [
+                    {"day": date, "temp_max": t_max, "rain": rain}
+                    for date, t_max, rain in zip(daily.get('time',[])[:3], daily.get('temperature_2m_max',[])[:3], daily.get('precipitation_sum',[])[:3])
+                ]
+            }
+            return info
+    except: pass
+    return None
+
 def create_static_map_image(lat, lon):
     try:
         m = StaticMap(400, 300)
-        marker = CircleMarker((lon, lat), 'red', 10) # Attention : lon, lat pour staticmap
+        marker = CircleMarker((lon, lat), 'red', 10) 
         m.add_marker(marker)
         image = m.render(zoom=10)
-        
-        # Sauvegarde temp
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             image.save(tmp.name)
             return tmp.name
     except: return None
 
-# --- PDF GENERATOR ---
+# --- PDF GENERATOR (Avec liens cliquables et météo) ---
 def generate_pdf_report(data):
-    # 1. Graphique Temp
     chart_path = None
     try:
         fig, ax = plt.subplots(figsize=(6, 2.5))
@@ -167,10 +225,8 @@ def generate_pdf_report(data):
         plt.close(fig)
     except: pass
 
-    # 2. Carte Temp (NOUVEAU)
     map_path = create_static_map_image(data.get('lat', 48.85), data.get('lon', 2.35))
 
-    # PDF
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 20); pdf.cell(0, 15, "RAPPORT D'AUDIT 360", ln=1, align='C')
@@ -180,9 +236,18 @@ def generate_pdf_report(data):
     pdf.set_font("Arial", '', 11)
     pdf.cell(0, 8, f"Valo: {data.get('valo_finale',0):,.0f} EUR | CA: {data.get('ca',0):,.0f} EUR", ln=1)
     pdf.cell(0, 8, f"Localisation: {data.get('ville', '?')} ({data.get('pays', '?')})", ln=1)
-    pdf.ln(5)
+    
+    # METEO SECTION
+    if data.get('weather_info') and isinstance(data['weather_info'], dict):
+        w = data['weather_info']
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(0, 8, f"METEO SITE: {w.get('temp')} C (Vent: {w.get('wind')} km/h)", ln=1)
+        pdf.set_font("Arial", '', 10)
+        for day in w.get('forecast', []):
+            pdf.cell(0, 5, f"- {day['day']}: Max {day['temp_max']}C, Pluie {day['rain']}mm", ln=1)
 
-    # Insertion Images (Carte + Graphique)
+    pdf.ln(5)
     if map_path:
         pdf.cell(0, 8, "Localisation Site:", ln=1)
         try: pdf.image(map_path, x=20, w=80)
@@ -190,15 +255,13 @@ def generate_pdf_report(data):
         pdf.ln(5)
         
     if chart_path:
-        # On remonte un peu le curseur si besoin
         if map_path: pdf.set_y(pdf.get_y() - 65); pdf.set_x(110)
         else: pdf.cell(0, 8, "Trajectoire:", ln=1)
-        
         try: pdf.image(chart_path, w=80) 
         except: pass
         pdf.ln(50 if map_path else 10)
 
-    # Nettoyage fichiers temp
+    # Nettoyage
     if chart_path and os.path.exists(chart_path):
         try: os.remove(chart_path)
         except: pass
@@ -208,13 +271,29 @@ def generate_pdf_report(data):
 
     # Détails
     pdf.set_x(10)
-    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "DETAIL DES RISQUES (VAR)", ln=1)
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "DETAIL DES RISQUES", ln=1)
     pdf.set_font("Arial", '', 11)
     pdf.cell(0, 8, f"Score Risque 2030: {data.get('s30',0):.2f}/5", ln=1)
-    pdf.cell(0, 8, f"Impact Financier Total: -{abs(data.get('var_amount',0)):,.0f} EUR", ln=1)
+    pdf.cell(0, 8, f"Impact Financier: -{abs(data.get('var_amount',0)):,.0f} EUR", ln=1)
     
+    # SOURCES CLIQUABLES
     pdf.ln(5)
-    pdf.multi_cell(0, 5, f"Resume:\n{str(data.get('wiki_summary',''))[:2000]}")
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "SOURCES & PRESSE", ln=1)
+    pdf.set_font("Arial", 'U', 9); pdf.set_text_color(0, 0, 255) # Bleu pour liens
+    
+    for n in data.get('news', []):
+        try:
+            # Titre propre pour le PDF
+            title = n['title'].encode('latin-1', 'replace').decode('latin-1')[:80] + "..."
+            pdf.cell(0, 6, f"- {title}", ln=1, link=n['link'])
+        except: continue
+        
+    pdf.set_text_color(0, 0, 0) # Retour Noir
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "CONTEXTE WIKI", ln=1)
+    pdf.set_font("Arial", '', 10)
+    pdf.multi_cell(0, 5, f"{str(data.get('wiki_summary',''))[:1500]}")
     
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
