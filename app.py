@@ -22,8 +22,8 @@ from datetime import datetime, timedelta
 from staticmap import StaticMap, CircleMarker
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="AquaRisk 12.0 : Enterprise", page_icon="🏢", layout="wide")
-st.title("🏢 AquaRisk 12.0 : Audit Financier & Climatique Détaillé")
+st.set_page_config(page_title="AquaRisk 12.1 : Stable", page_icon="🏢", layout="wide")
+st.title("🏢 AquaRisk 12.1 : Audit Financier & Climatique")
 
 # --- INITIALISATION ---
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
@@ -46,7 +46,10 @@ def load_data():
         return None
 
     df_now = smart_read("risk_actuel.csv")
-    if df_now is not None and 'score' in df_now.columns:
+    if df_now is None: 
+        # Fallback si pas de CSV
+        df_now = pd.DataFrame({'name_0': ['France'], 'name_1': ['Ile-de-France'], 'score': [2.5]})
+    elif 'score' in df_now.columns:
         df_now['score'] = pd.to_numeric(df_now['score'].astype(str).str.replace(',', '.'), errors='coerce')
         if 'indicator_name' in df_now.columns: df_now = df_now[df_now['indicator_name'] == 'bws']
 
@@ -68,7 +71,6 @@ class MockLocation:
         self.latitude = lat; self.longitude = lon
 
 def get_location_safe(ville, pays):
-    # Liste de secours pour éviter le blocage API
     ville_clean = ville.lower().strip()
     fallback = {
         "paris": (48.8566, 2.3522), "lyon": (45.7640, 4.8357), "marseille": (43.2965, 5.3698),
@@ -85,7 +87,7 @@ def get_location_safe(ville, pays):
             loc = geolocator.geocode(f"{ville}, {pays}", language='en')
             if loc: return loc
         except: time.sleep(1); continue
-    return MockLocation(48.8566, 2.3522) # Default Paris
+    return MockLocation(48.8566, 2.3522)
 
 def trouver_meilleur_nom(nom_cherche, liste_options, seuil=75):
     if not nom_cherche or len(liste_options) == 0: return None
@@ -126,7 +128,6 @@ def scan_website(url):
         r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, 'html.parser')
-            # On récupère plus de texte pour le rapport
             return ' '.join([p.text for p in soup.find_all('p')])[:8000]
     except: return ""
     return ""
@@ -161,7 +162,6 @@ def extract_text_from_pdfs(uploaded_files):
         try:
             with pdfplumber.open(pdf_file) as pdf:
                 text = ""
-                # On scanne plus de pages pour avoir du contenu
                 for page in pdf.pages[:20]: text += page.extract_text() or ""
                 full_text += text + " "
                 file_names.append(pdf_file.name)
@@ -201,59 +201,29 @@ def get_stock_advanced(ticker):
         return mcap, ev
     except: return 0, 0
 
-def calculate_live_multiples():
-    sectors_proxies = {
-        "Logiciel (SaaS)": ["CRM", "ADBE"], "Service Info (ESN)": ["CAP.PA"],
-        "Industrie": ["SIE.DE", "SU.PA"], "Agroalimentaire": ["BN.PA", "NESN.SW"],
-        "Commerce / Retail": ["CA.PA", "WMT"], "BTP / Construction": ["DG.PA", "EN.PA"]
-    }
-    results = {}
-    for i, (sector, tickers) in enumerate(sectors_proxies.items()):
-        mev_rev = []; mev_ebitda = []
-        for t in tickers:
-            try:
-                stock = yf.Ticker(t)
-                ev_rev = stock.info.get('enterpriseToRevenue')
-                ev_ebitda = stock.info.get('enterpriseToEbitda')
-                if ev_rev: mev_rev.append(ev_rev)
-                if ev_ebitda: mev_ebitda.append(ev_ebitda)
-            except: continue
-        avg_rev = sum(mev_rev)/len(mev_rev) if mev_rev else 1.0
-        avg_ebitda = sum(mev_ebitda)/len(mev_ebitda) if mev_ebitda else 8.0
-        results[sector] = {"ca_multiple": avg_rev * 0.70, "ebitda_multiple": avg_ebitda * 0.70, "sample": ", ".join(tickers)}
-    return results
-
-# --- 5. MOTEUR ANALYSE INTELLIGENT ---
-def analyser_site(ville, pays, secteur_vulnerabilite, region_forcee=None):
+# --- 5. MOTEUR ANALYSE ---
+def analyser_site(ville, pays, region_forcee=None):
     loc = get_location_safe(ville, pays)
     
-    # 1. Matching Pays
+    # Matching Pays
     liste_pays = df_actuel['name_0'].unique()
     pays_trouve = trouver_meilleur_nom(pays, liste_pays, seuil=70)
-    if not pays_trouve: pays_trouve = pays # Fallback
+    if not pays_trouve: pays_trouve = pays
 
-    # 2. Score Actuel (2024)
-    s2024 = 2.5 # Default Moyenne
+    # Score Actuel
+    s2024 = 2.5
     if pays_trouve in df_actuel['name_0'].values:
         df_pays = df_actuel[df_actuel['name_0'] == pays_trouve]
         match_now = df_pays
-        if region_forcee:
-            match_reg = df_pays[df_pays['name_1'].astype(str).str.contains(region_forcee, case=False)]
-            if not match_reg.empty: match_now = match_reg
         s2024 = match_now['score'].mean()
 
-    # 3. Score Futur (2030)
-    s2030 = s2024 * 1.1 # Default +10% risk
+    # Score Futur
+    s2030 = s2024 * 1.1
     if df_futur is not None and pays_trouve in df_futur['name_0'].values:
         df_f_pays = df_futur[df_futur['name_0'] == pays_trouve]
-        match_fut = df_f_pays
-        if region_forcee:
-            match_reg_f = df_f_pays[df_f_pays['name_1'].astype(str).str.contains(region_forcee, case=False)]
-            if not match_reg_f.empty: match_fut = match_reg_f
-        s2030 = match_fut['score'].mean()
+        s2030 = df_f_pays['score'].mean()
 
-    # 4. Interpolation 2026
-    # Si 2024 -> 2030 (6 ans), 2026 est à 1/3 du chemin (2 ans)
+    # Interpolation
     delta = s2030 - s2024
     s2026 = s2024 + (delta * (2/6))
     
@@ -281,13 +251,12 @@ def create_pdf(data, corpus_text, notes):
     def clean(t): return str(t).encode('latin-1', 'replace').decode('latin-1')
     pdf = FPDF()
     
-    # PAGE 1 : DASHBOARD
+    # PAGE 1
     pdf.add_page()
     pdf.set_font("Arial", 'B', 20)
     pdf.cell(0, 15, clean(f"RAPPORT D'AUDIT: {data['ent'].upper()}"), ln=1, align='C')
     pdf.ln(10)
     
-    # Carte
     map_file = generer_image_carte(data['lat'], data['lon'])
     if map_file and os.path.exists(map_file):
         pdf.image(map_file, x=20, w=170)
@@ -316,7 +285,7 @@ def create_pdf(data, corpus_text, notes):
     pdf.set_font("Arial", 'I', 11)
     pdf.multi_cell(0, 6, clean(f"Conclusion IA: {data['txt_ia']}"))
     
-    # PAGE 2 : DETAILS & SOURCES
+    # PAGE 2
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, "ANALYSE DETAILLEE & SOURCES", ln=1)
@@ -340,9 +309,9 @@ def create_pdf(data, corpus_text, notes):
     pdf.cell(0, 10, "2. Analyse Data Room (PDFs)", ln=1)
     pdf.set_font("Arial", size=9)
     if data['doc_files']:
-        pdf.multi_cell(0, 5, clean(f"Fichiers analyses: {', '.join(data['doc_files'])}"))
-        # On affiche un extrait du corpus
-        extract = corpus_text[:2000].replace('\n', ' ')
+        pdf.multi_cell(0, 5, clean(f"Fichiers: {', '.join(data['doc_files'])}"))
+        # Affiche un extrait
+        extract = corpus_text[:1500].replace('\n', ' ')
         pdf.multi_cell(0, 5, clean(f"Extrait analyse: {extract}..."))
     else:
         pdf.cell(0, 10, "Aucun document fourni.", ln=1)
@@ -360,8 +329,6 @@ def create_pdf(data, corpus_text, notes):
 with st.sidebar:
     st.header("⚙️ Config")
     pappers_key = st.text_input("Clé API Pappers", type="password")
-    if st.button("Actualiser Marchés"):
-        with st.spinner("Wait..."): st.session_state.live_multiples = calculate_live_multiples()
 
 c1, c2 = st.columns([1, 2])
 with c1:
@@ -377,7 +344,7 @@ with c1:
     valeur_finale = 0.0
     source_info = "Manuel"
     
-    # FACTEUR DE VULNÉRABILITÉ DU SECTEUR
+    # --- CORRECTION ICI (Le split correspond aux options) ---
     secteur_risk = st.selectbox("Secteur (Vulnérabilité Eau)", [
         "Agroalimentaire (Critique - 100%)", 
         "Industrie Lourde (Élevé - 70%)",
@@ -385,8 +352,14 @@ with c1:
         "Commerce / Retail (Faible - 20%)",
         "Logiciel / Tech (Nul - 5%)"
     ])
+    
+    # Dictionnaire mappé sur le premier mot des options
     vuln_factor = {
-        "Agro": 1.0, "Industrie": 0.7, "BTP": 0.4, "Commerce": 0.2, "Logiciel": 0.05
+        "Agroalimentaire": 1.0, 
+        "Industrie": 0.7, 
+        "BTP": 0.4, 
+        "Commerce": 0.2, 
+        "Logiciel": 0.05
     }[secteur_risk.split()[0]]
 
     if mode_val == "Cotée":
@@ -421,7 +394,7 @@ with c1:
     
     if st.button("🚀 AUDIT"):
         with st.spinner("Calculs..."):
-            res = analyser_site(v, p, vuln_factor)
+            res = analyser_site(v, p, region_forcee=None) # Corrected arguments
             if res and res['found']:
                 news = get_company_news_strict(ent, country=p)
                 ma_news = get_market_news(ent)
@@ -429,20 +402,15 @@ with c1:
                 web_txt = scan_website(website)
                 doc_text, doc_names = extract_text_from_pdfs(uploaded_docs)
                 
-                # Corpus complet pour l'analyse
                 full_corpus = f"{notes_manuelles} {web_txt} {wiki_txt} {doc_text} {' '.join([n['title'] for n in news])}"
                 
-                # --- CALCUL COHÉRENT DE LA PERTE (VaR) ---
-                # Formule : Valeur * (Augmentation du Risque) * (Vulnérabilité Secteur)
-                # Si le risque baisse ou stagne, la VaR est 0.
-                delta_risk_2026 = max(0, res['s2026'] - 1.5) # Seuil de tolérance à 1.5
+                # Calcul VaR
+                delta_risk_2026 = max(0, res['s2026'] - 1.5)
                 delta_risk_2030 = max(0, res['s2030'] - 1.5)
                 
-                # On normalise le risque sur 5. Si score passe de 2 à 4, c'est grave.
                 impact_2026 = valeur_finale * (delta_risk_2026 / 5.0) * vuln_factor
                 impact_2030 = valeur_finale * (delta_risk_2030 / 5.0) * vuln_factor
 
-                # Détection Mots Clés
                 risk_count = sum(1 for w in ['litige', 'procès', 'amende'] if w in full_corpus.lower())
                 txt_ia = "Situation stable."
                 if risk_count > 0: txt_ia = f"⚠️ ALERTE : {risk_count} mentions de risques légaux détectées."
@@ -452,6 +420,7 @@ with c1:
                 res['var_2030'] = impact_2030
                 res['doc_files'] = doc_names
                 res['txt_ia'] = txt_ia; res['news'] = news + ma_news
+                res['full_text'] = full_corpus # Stockage pour PDF
                 
                 st.session_state.audit_unique = res
                 st.rerun()
@@ -470,10 +439,8 @@ with c2:
         
         t1, t2 = st.tabs(["📄 Rapport PDF", "📊 Détails"])
         with t1:
-            # On passe tout le corpus pour le PDF
-            corpus_display = r['txt_ia'] # Simplifié ici
-            pdf = create_pdf(r, corpus_display, notes_manuelles)
-            st.download_button("Télécharger Rapport Complet (PDF)", pdf, file_name="Rapport_Audit_V12.pdf")
+            pdf = create_pdf(r, r['full_text'], notes_manuelles)
+            st.download_button("Télécharger Rapport Complet (PDF)", pdf, file_name="Rapport_Audit_V12.1.pdf")
             
         with t2:
             st.write("### Articles Analysés")
