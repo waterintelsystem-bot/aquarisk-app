@@ -11,231 +11,408 @@ from fpdf import FPDF
 from datetime import datetime
 import folium
 from streamlit_folium import st_folium
+import xlsxwriter
+import feedparser
+from random import randint
+from thefuzz import process
+
+# On gère l'absence de geopy pour éviter le crash immédiat
 try:
     from geopy.geocoders import Nominatim
-except: pass
+except ImportError:
+    Nominatim = None
 
 # ==============================================================================
-# 1. INITIALISATION & CONFIG
+# 1. ARCHITECTURE & CONFIGURATION
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk V27.1 : Stable", page_icon="🛡️", layout="wide")
-st.title("🛡️ AquaRisk V27.1 : Audit Intégral & Sécurisé")
+st.set_page_config(page_title="AquaRisk V30 : Architecture Stable", page_icon="🏢", layout="wide")
 
-# Variables de Session (Mémoire)
-defaults = {
-    'finance_ca': 1000000.0, 'finance_res': 100000.0, 'finance_cap': 200000.0,
-    'audit_done': False, 'audit_data': {}, 
-    'ocr_log': "", 'lat': 48.8566, 'lon': 2.3522 # Paris par défaut
-}
-for k, v in defaults.items():
-    if k not in st.session_state: st.session_state[k] = v
+# --- CSS POUR STABILISER L'INTERFACE ---
+st.markdown("""
+    <style>
+    .stMetric {background-color: #f0f2f6; padding: 10px; border-radius: 5px;}
+    .stAlert {padding: 10px;}
+    </style>
+""", unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. MOTEUR OCR "AGGRESSIF"
+# 2. LE "COFFRE-FORT" (SESSION STATE MANAGER)
 # ==============================================================================
-def clean_number(text_num):
-    try:
-        clean = text_num.replace(' ', '').replace(')', '').replace('(', '-').replace("'", "").replace('"', "")
-        clean = re.sub(r'[^\d,\.-]', '', clean).replace(',', '.')
-        if clean.count('.') > 1: clean = clean.replace('.', '', clean.count('.') - 1)
-        return float(clean)
-    except: return None
-
-def extract_financials_aggressive(text):
-    data = {"ca": 0, "res": 0, "cap": 0, "found": False}
-    text_upper = text.upper()
-    keywords_map = {
-        "ca": ["CHIFFRES D'AFFAIRES", "PRODUITS D'EXPLOITATION", "VENTES"],
-        "res": ["RESULTAT NET", "BENEFICE OU PERTE", "RESULTAT DE L'EXERCICE"],
-        "cap": ["CAPITAUX PROPRES", "SITUATION NETTE"]
+def init_session_state():
+    # Définition de toutes les variables nécessaires au fonctionnement
+    defaults = {
+        # Données Entreprise
+        'ent_name': "Michel et Augustin",
+        'ville': "Issy-les-Moulineaux",
+        'pays': "France",
+        'lat': 48.823, 'lon': 2.269,
+        'secteur': "Agroalimentaire (100%)",
+        
+        # Données Financières (Brutes)
+        'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'ebitda': 0.0,
+        'source_data': "Manuel", # ou "OCR PDF", "Pappers", "Yahoo"
+        
+        # Données Valo
+        'mode_valo': "PME (Non Cotée)",
+        'methode_pme': "Multiple CA",
+        'multiple': 1.5,
+        'valo_finale': 0.0,
+        
+        # Données Climat
+        's24': 2.5, 's26': 2.7, 's30': 3.1,
+        'var_amount': 0.0,
+        'pluie_90j': "N/A",
+        
+        # Intelligence & Docs
+        'news': [],
+        'wiki_summary': "",
+        'ocr_log': "",
+        'doc_content': "",
+        
+        # Flags
+        'audit_launched': False
     }
-    for metric, keys in keywords_map.items():
-        if data[metric] != 0: continue
-        for k in keys:
-            if k in text_upper:
-                idx = text_upper.find(k)
-                window = text_upper[idx:idx+400]
-                nums = re.findall(r'-?\s*(?:\d{1,3}(?:\s\d{3})*|\d+)(?:[\.,]\d+)?', window)
-                valid_nums = []
-                for n in nums:
-                    val = clean_number(n)
-                    if val and (abs(val) > 2050 or abs(val) < 1900) and abs(val) > 1000:
-                        valid_nums.append(val)
-                if valid_nums:
-                    if metric == "ca": data["ca"] = max(valid_nums, key=abs)
-                    else: data[metric] = valid_nums[0]
-                    data["found"] = True
-                    break
-    return data
 
-def read_pdf(file):
-    text = ""
-    try:
-        with pdfplumber.open(file) as pdf:
-            for p in pdf.pages[:30]: text += (p.extract_text() or "") + "\n"
-    except: pass
-    return text
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+init_session_state()
 
 # ==============================================================================
-# 3. DONNEES & CALCULS
+# 3. LES MOTEURS LOGIQUES (BACKEND)
 # ==============================================================================
-def get_location(ville, pays):
-    try:
-        geolocator = Nominatim(user_agent=f"AR_{randint(1,9999)}")
-        loc = geolocator.geocode(f"{ville}, {pays}", timeout=3)
-        if loc: return loc.latitude, loc.longitude
-    except: pass
-    return 48.8566, 2.3522 # Fallback Paris
 
-def get_projections_climat(score_actuel):
-    s2024 = score_actuel
-    s2030 = min(score_actuel * 1.25, 5.0)
-    s2026 = s2024 + (s2030 - s2024) * (2/6)
-    return s2024, s2026, s2030
+class FinancialEngine:
+    @staticmethod
+    def clean_number(text_num):
+        """Nettoie n'importe quel format de nombre (ex: (10 000) -> -10000.0)"""
+        if not isinstance(text_num, str): return 0.0
+        try:
+            clean = text_num.replace(' ', '').replace(')', '').replace('(', '-').replace("'", "").replace('"', "")
+            clean = re.sub(r'[^\d,\.-]', '', clean).replace(',', '.')
+            if clean.count('.') > 1: clean = clean.replace('.', '', clean.count('.') - 1)
+            return float(clean)
+        except: return 0.0
+
+    @staticmethod
+    def run_ocr(file_obj):
+        """OCR Robuste : Lit tout et cherche les patterns"""
+        stats = {'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'found': False}
+        full_text = ""
+        
+        try:
+            with pdfplumber.open(file_obj) as pdf:
+                for p in pdf.pages[:30]: 
+                    full_text += (p.extract_text() or "") + "\n"
+            
+            text_upper = full_text.upper()
+            patterns = {
+                'ca': ["CHIFFRES D'AFFAIRES", "PRODUITS D'EXPLOITATION", "VENTES"],
+                'res': ["RESULTAT NET", "BENEFICE OU PERTE", "RESULTAT DE L'EXERCICE"],
+                'cap': ["CAPITAUX PROPRES", "SITUATION NETTE"]
+            }
+
+            for key, keywords in patterns.items():
+                for kw in keywords:
+                    if kw in text_upper:
+                        idx = text_upper.find(kw)
+                        # Fenêtre de recherche large (400 chars après le mot clé)
+                        window = text_upper[idx:idx+400] 
+                        # Regex pour trouver des nombres isolés
+                        nums = re.findall(r'-?\s*(?:\d{1,3}(?:\s\d{3})*|\d+)(?:[\.,]\d+)?', window)
+                        
+                        valid_nums = []
+                        for n in nums:
+                            val = FinancialEngine.clean_number(n)
+                            # Filtre intelligent : on ignore les années (1990-2030) et numéros de page
+                            if abs(val) > 2050 or (abs(val) > 500 and abs(val) < 1900):
+                                valid_nums.append(val)
+                        
+                        if valid_nums:
+                            # Pour le CA on prend le max, pour le reste le premier pertinent
+                            if key == 'ca': stats['ca'] = max(valid_nums, key=abs)
+                            else: stats[key] = valid_nums[0]
+                            stats['found'] = True
+                            break # On passe au pattern suivant
+        except Exception as e:
+            return stats, f"Erreur OCR: {str(e)}", ""
+
+        return stats, "Succès", full_text
+
+    @staticmethod
+    def get_yahoo_data(ticker):
+        try:
+            tick = yf.Ticker(ticker)
+            info = tick.info
+            # Fallback fast_info si info est vide
+            mcap = info.get('marketCap') or tick.fast_info.get('market_cap')
+            return mcap if mcap else 0.0, info.get('shortName', ticker)
+        except: return 0.0, "Inconnu"
+
+class ClimateEngine:
+    @staticmethod
+    def get_coords(ville, pays):
+        if Nominatim:
+            try:
+                geolocator = Nominatim(user_agent=f"AR_V30_{randint(1,10000)}")
+                loc = geolocator.geocode(f"{ville}, {pays}", timeout=3)
+                if loc: return loc.latitude, loc.longitude
+            except: pass
+        return 48.8566, 2.3522 # Paris défaut
+
+    @staticmethod
+    def get_risk_curve(base_score=2.5):
+        # Simulation d'une courbe de risque standard
+        s24 = base_score
+        s30 = min(s24 * 1.2, 5.0) # +20% en 2030
+        s26 = s24 + (s30 - s24) * 0.33
+        return s24, s26, s30
+
+class ReportEngine:
+    @staticmethod
+    def generate_pdf(data):
+        pdf = FPDF()
+        pdf.add_page()
+        
+        # En-tête
+        pdf.set_font("Arial", 'B', 20)
+        pdf.cell(0, 15, f"AUDIT: {data['ent_name']}", ln=1, align='C')
+        pdf.ln(10)
+        
+        # Section 1: Finance
+        pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "1. FINANCE & VALORISATION", ln=1)
+        pdf.set_font("Arial", '', 11)
+        pdf.cell(0, 8, f"Valorisation Retenue: {data['valo_finale']:,.0f} EUR", ln=1)
+        pdf.cell(0, 8, f"Methode: {data['mode_valo']} / {data['methode_pme']}", ln=1)
+        pdf.cell(0, 8, f"CA: {data['ca']:,.0f} EUR | Res. Net: {data['res']:,.0f} EUR", ln=1)
+        pdf.ln(5)
+        
+        # Section 2: Climat
+        pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "2. RISQUE CLIMATIQUE", ln=1)
+        pdf.set_font("Arial", '', 11)
+        pdf.cell(0, 8, f"Score Risque Eau 2030: {data['s30']:.2f} / 5.00", ln=1)
+        pdf.cell(0, 8, f"Evolution 2024-2030: +{data['s30']-data['s24']:.2f} pts", ln=1)
+        
+        # Section 3: VaR
+        pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "3. IMPACT FINANCIER (VAR)", ln=1)
+        pdf.set_font("Arial", '', 11)
+        txt_var = f"PERTE ESTIMEE 2030: -{abs(data['var_amount']):,.0f} EUR" if data['var_amount'] > 0 else "Pas d'impact significatif"
+        pdf.cell(0, 8, txt_var, ln=1)
+        
+        # Section 4: Sources
+        pdf.ln(10)
+        pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "4. SOURCES INTELLIGENCE", ln=1)
+        pdf.set_font("Arial", '', 10)
+        for n in data['news']:
+            try:
+                title = n['title'].encode('latin-1', 'replace').decode('latin-1')
+                pdf.cell(0, 6, f"- {title}", ln=1, link=n['link'])
+            except: continue
+            
+        return pdf.output(dest='S').encode('latin-1', 'replace')
 
 # ==============================================================================
-# 4. INTERFACE
+# 4. INTERFACE UTILISATEUR (FRONTEND)
 # ==============================================================================
+
+# --- SIDEBAR (PARAMÈTRES GLOBAUX) ---
 with st.sidebar:
-    st.header("⚙️ Config")
-    if st.button("🔄 Nettoyer Mémoire (Reset)"):
+    st.header("⚙️ Paramètres")
+    if st.button("♻️ Réinitialiser l'Audit"):
         st.session_state.clear()
         st.rerun()
+    st.info("Version 30.0 Stable\nMode : Expert")
 
-col_settings, col_main = st.columns([1, 2])
+# --- CORPS PRINCIPAL ---
+st.subheader(f"Dossier : {st.session_state['ent_name']}")
 
-with col_settings:
-    st.header("1. Saisie & Documents")
+# TABS POUR ORGANISER L'INFORMATION
+tab_input, tab_dashboard, tab_docs = st.tabs(["📝 Saisie & Données", "📊 Dashboard & Climat", "📄 Rapports & Sources"])
+
+# ----------------- TAB 1 : SAISIE -----------------
+with tab_input:
+    c1, c2 = st.columns([1, 1])
     
-    ent = st.text_input("Entreprise", "Michel et Augustin")
-    ville = st.text_input("Ville", "Issy-les-Moulineaux")
-    pays = st.text_input("Pays", "France")
-    
-    st.markdown("---")
-    st.subheader("Import Bilan (Auto)")
-    
-    uploaded_pdf = st.file_uploader("Glissez le Bilan PDF ici", type=["pdf"])
-    
-    if uploaded_pdf:
-        if st.session_state.ocr_log == "":
-            with st.spinner("Lecture des chiffres..."):
-                txt = read_pdf(uploaded_pdf)
-                fin = extract_financials_aggressive(txt)
-                if fin['found']:
-                    st.session_state.finance_ca = fin['ca']
-                    st.session_state.finance_res = fin['res']
-                    st.session_state.finance_cap = fin['cap']
-                    st.session_state.ocr_log = "Succès"
-                    st.success("✅ Chiffres détectés et remplis !")
+    with c1:
+        st.markdown("### 1. Identité")
+        # On met à jour le session_state directement via les clés 'key'
+        st.text_input("Nom Entreprise", key="ent_name")
+        col_v, col_p = st.columns(2)
+        with col_v: st.text_input("Ville", key="ville")
+        with col_p: st.text_input("Pays", key="pays")
+        
+        st.markdown("### 2. Secteur & Vulnérabilité")
+        secteurs = ["Agroalimentaire (100%)", "Industrie (70%)", "Energie (60%)", "BTP (40%)", "Services (5%)"]
+        st.selectbox("Secteur", options=secteurs, key="secteur")
+
+    with c2:
+        st.markdown("### 3. Données Financières")
+        mode = st.radio("Mode de saisie", ["PME (Non Cotée)", "Cotée (Bourse)", "Startup"], key="mode_valo", horizontal=True)
+        
+        if mode == "PME (Non Cotée)":
+            # --- ZONE OCR ---
+            uploaded = st.file_uploader("Importer Liasse Fiscale (PDF)", type=['pdf'])
+            if uploaded:
+                if st.button("🧠 Analyser le Bilan"):
+                    stats, msg, txt = FinancialEngine.run_ocr(uploaded)
+                    if stats['found']:
+                        st.session_state['ca'] = stats['ca']
+                        st.session_state['res'] = stats['res']
+                        st.session_state['cap'] = stats['cap']
+                        st.session_state['source_data'] = "OCR PDF"
+                        st.session_state['doc_content'] = txt
+                        st.success(f"Données extraites : CA {stats['ca']:,.0f}")
+                    else:
+                        st.error("Lecture difficile. Veuillez saisir manuellement.")
+            
+            # --- CHAMPS MANUELS (Connectés au State) ---
+            st.number_input("Chiffre d'Affaires (€)", key="ca")
+            st.number_input("Résultat Net (€)", key="res")
+            st.number_input("Capitaux Propres (€)", key="cap")
+            
+            st.markdown("#### Méthode de Valorisation")
+            meth = st.selectbox("Méthode", ["Multiple CA", "Multiple EBITDA", "Patrimonial", "DCF Simplifié"], key="methode_pme")
+            
+            val_calc = 0.0
+            if meth == "Multiple CA":
+                mult = st.slider("Multiple CA", 0.5, 5.0, 1.5, 0.1)
+                val_calc = st.session_state['ca'] * mult
+            elif meth == "Multiple EBITDA":
+                # Approx Ebitda
+                ebitda = st.session_state['res'] * 1.25
+                mult = st.slider("Multiple EBITDA", 3.0, 15.0, 7.0, 0.5)
+                val_calc = ebitda * mult
+            elif meth == "Patrimonial":
+                val_calc = st.session_state['cap']
+            else: # DCF
+                val_calc = st.session_state['res'] * 10 # Simple proxy
+            
+            st.session_state['valo_finale'] = val_calc
+            st.metric("Valorisation Calculée", f"{val_calc:,.0f} €")
+
+        elif mode == "Cotée (Bourse)":
+            ticker = st.text_input("Ticker Yahoo (ex: BN.PA)", "BN.PA")
+            if st.button("Charger Données Bourse"):
+                mcap, name = FinancialEngine.get_yahoo_data(ticker)
+                if mcap > 0:
+                    st.session_state['valo_finale'] = mcap
+                    st.session_state['source_data'] = f"Yahoo ({ticker})"
+                    # Estimation CA/Res pour ratios
+                    st.session_state['ca'] = mcap * 0.5
+                    st.session_state['res'] = mcap * 0.05
+                    st.success(f"Société : {name} | Valo : {mcap:,.0f} €")
                 else:
-                    st.warning("⚠️ Lecture difficile, remplissez manuellement.")
-                    st.session_state.ocr_log = "Echec"
+                    st.error("Ticker introuvable.")
+            st.number_input("Capitalisation (€)", key="valo_finale")
 
-    # CHAMPS MANUELS (MAIS REMPLIS PAR OCR)
-    ca = st.number_input("Chiffre d'Affaires (€)", value=st.session_state.finance_ca, key="finance_ca")
-    res = st.number_input("Résultat Net (€)", value=st.session_state.finance_res, key="finance_res")
-    cap = st.number_input("Capitaux Propres (€)", value=st.session_state.finance_cap, key="finance_cap")
-    
-    methode = st.selectbox("Méthode Valo", ["Multiple CA", "Multiple EBITDA", "Patrimonial"])
-    
-    # Calcul Valo en temps réel
-    if methode == "Multiple CA":
-        mult = st.slider("Multiple", 0.5, 5.0, 1.5)
-        valo = ca * mult
-    elif methode == "Multiple EBITDA":
-        ebitda = res * 1.25 # Approx
-        mult = st.slider("Multiple", 3.0, 15.0, 7.0)
-        valo = ebitda * mult
+        else: # Startup
+            stade = st.selectbox("Stade", ["Pre-Seed", "Seed", "Series A", "Series B"])
+            ranges = {"Pre-Seed": 1.5e6, "Seed": 5e6, "Series A": 15e6, "Series B": 50e6}
+            val_calc = st.slider("Valorisation (€)", 500000.0, 100000000.0, ranges[stade.split()[0]])
+            st.session_state['valo_finale'] = val_calc
+
+# ----------------- TAB 2 : DASHBOARD -----------------
+with tab_dashboard:
+    if st.button("🚀 ACTUALISER L'AUDIT", type="primary"):
+        with st.spinner("Calculs géographiques et risques..."):
+            # 1. Geo
+            lat, lon = ClimateEngine.get_coords(st.session_state['ville'], st.session_state['pays'])
+            st.session_state['lat'] = lat
+            st.session_state['lon'] = lon
+            
+            # 2. Risque
+            s24, s26, s30 = ClimateEngine.get_risk_curve()
+            st.session_state['s24'] = s24
+            st.session_state['s26'] = s26
+            st.session_state['s30'] = s30
+            
+            # 3. VaR
+            # Facteur vulnérabilité (Regex pour extraire le %)
+            vuln_str = st.session_state['secteur']
+            vuln_pct = float(re.findall(r'\d+', vuln_str)[0]) / 100
+            
+            delta_risk = s30 - s24
+            var = st.session_state['valo_finale'] * (delta_risk / 5.0) * vuln_pct
+            st.session_state['var_amount'] = var
+            
+            # 4. News
+            try:
+                q = urllib.parse.quote(st.session_state['ent_name'])
+                f = feedparser.parse(f"https://news.google.com/rss/search?q={q}&hl=fr-FR&gl=FR&ceid=FR:fr")
+                st.session_state['news'] = [{"title": e.title, "link": e.link} for e in f.entries[:5]]
+            except: pass
+            
+            st.session_state['audit_launched'] = True
+
+    if st.session_state['audit_launched']:
+        # KPIs
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Valorisation", f"{st.session_state['valo_finale']:,.0f} €")
+        k2.metric("Chiffre d'Affaires", f"{st.session_state['ca']:,.0f} €")
+        k3.metric("Risque Eau 2030", f"{st.session_state['s30']:.2f}/5", delta=f"+{st.session_state['s30']-st.session_state['s24']:.2f}", delta_color="inverse")
+        k4.metric("Impact (VaR)", f"-{abs(st.session_state['var_amount']):,.0f} €", delta="Perte Potentielle", delta_color="inverse")
+        
+        st.markdown("---")
+        
+        # CARTE ET GRAPHIQUE
+        col_visu1, col_visu2 = st.columns([1, 1])
+        
+        with col_visu1:
+            st.subheader("📍 Localisation")
+            m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=11)
+            folium.Marker(
+                [st.session_state['lat'], st.session_state['lon']], 
+                popup=st.session_state['ent_name'], 
+                icon=folium.Icon(color="red", icon="info-sign")
+            ).add_to(m)
+            st_folium(m, height=350, use_container_width=True)
+            
+        with col_visu2:
+            st.subheader("📈 Évolution du Risque")
+            chart_data = pd.DataFrame({
+                "Année": ["2024", "2026", "2030"],
+                "Risque": [st.session_state['s24'], st.session_state['s26'], st.session_state['s30']]
+            }).set_index("Année")
+            st.line_chart(chart_data)
+            
+            st.info(f"Vulnérabilité sectorielle appliquée : {st.session_state['secteur']}")
+
+# ----------------- TAB 3 : RAPPORTS -----------------
+with tab_docs:
+    if st.session_state['audit_launched']:
+        c_pdf, c_xls = st.columns(2)
+        
+        with c_pdf:
+            st.markdown("### Rapport PDF")
+            pdf_data = ReportEngine.generate_pdf(st.session_state)
+            st.download_button("📄 Télécharger le PDF", pdf_data, file_name="Rapport_Audit.pdf", mime="application/pdf")
+            
+        with c_xls:
+            st.markdown("### Export Excel")
+            # Création Excel en mémoire
+            output = io.BytesIO()
+            workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+            ws = workbook.add_worksheet()
+            data_rows = [
+                ["Indicateur", "Valeur"],
+                ["Entreprise", st.session_state['ent_name']],
+                ["Valorisation", st.session_state['valo_finale']],
+                ["CA", st.session_state['ca']],
+                ["Score 2030", st.session_state['s30']],
+                ["VaR", st.session_state['var_amount']]
+            ]
+            for i, r in enumerate(data_rows):
+                ws.write_row(i, 0, r)
+            workbook.close()
+            st.download_button("📊 Télécharger Excel", output.getvalue(), file_name="Data.xlsx")
+            
+        st.markdown("### 📰 Sources Détectées")
+        if st.session_state['news']:
+            for n in st.session_state['news']:
+                st.write(f"- [{n['title']}]({n['link']})")
+        else:
+            st.write("Pas d'actualités récentes.")
     else:
-        valo = cap
+        st.warning("Veuillez lancer l'audit dans l'onglet 'Dashboard' pour générer les rapports.")
 
-    st.metric("Valorisation Estimée", f"{valo:,.0f} €")
-    
-    st.markdown("---")
-    if st.button("🚀 LANCER L'ANALYSE COMPLETE", type="primary"):
-        with st.spinner("Génération carte et trajectoires..."):
-            lat, lon = get_location(ville, pays)
-            s24, s26, s30 = get_projections_climat(2.5) # Score de base moyen
-            
-            delta_score = s30 - s24
-            var_value = valo * (delta_score / 5.0) * 0.5
-            
-            st.session_state.audit_data = {
-                "ent": ent, "ville": ville, "valo": valo,
-                "s24": s24, "s26": s26, "s30": s30,
-                "lat": lat, "lon": lon, "var": var_value,
-                "ca": ca, "res": res
-            }
-            st.session_state.audit_done = True
-            st.rerun()
-
-with col_main:
-    if st.session_state.audit_done:
-        d = st.session_state.audit_data
-        
-        st.header(f"Rapport d'Audit : {d.get('ent', 'N/A')}")
-        
-        # 1. KPIs (Sécurisés avec .get)
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Valorisation Actuelle", f"{d.get('valo',0):,.0f} €")
-        
-        s30 = d.get('s30', 2.5)
-        s24 = d.get('s24', 2.5)
-        k2.metric("Risque Eau 2030", f"{s30:.2f}/5", delta=f"+{(s30-s24):.2f}", delta_color="inverse")
-        
-        var = d.get('var', 0)
-        k3.metric("Impact Financier (VaR)", f"-{var:,.0f} €", delta="Perte potentielle", delta_color="inverse")
-        
-        # 2. ONGLETS
-        tab_clim, tab_fin, tab_doc = st.tabs(["🌍 Climat & Carte", "💰 Finance & Détails", "📄 Sources & PDF"])
-        
-        with tab_clim:
-            c_map, c_graph = st.columns([1, 1])
-            
-            with c_map:
-                st.subheader("Localisation")
-                lat = d.get('lat', 48.8566)
-                lon = d.get('lon', 2.3522)
-                m = folium.Map(location=[lat, lon], zoom_start=10)
-                folium.Marker([lat, lon], popup=d.get('ent'), icon=folium.Icon(color="red", icon="warning")).add_to(m)
-                st_folium(m, height=300, width=400)
-            
-            with c_graph:
-                st.subheader("Trajectoire Risque")
-                chart_data = pd.DataFrame({
-                    "Année": [2024, 2026, 2030],
-                    "Score Risque": [d.get('s24',0), d.get('s26',0), d.get('s30',0)]
-                }).set_index("Année")
-                st.line_chart(chart_data)
-
-        with tab_fin:
-            st.subheader("Analyse Financière")
-            col_f1, col_f2 = st.columns(2)
-            with col_f1:
-                st.write(f"**Chiffre d'Affaires :** {d.get('ca',0):,.0f} €")
-                st.write(f"**Résultat Net :** {d.get('res',0):,.0f} €")
-            with col_f2:
-                if d.get('ca',0) > 0:
-                    marge = (d.get('res',0) / d['ca']) * 100
-                    st.metric("Marge Nette", f"{marge:.1f} %")
-
-        with tab_doc:
-            st.subheader("Export")
-            # Génération PDF Simple et Robuste
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", "B", 16)
-            pdf.cell(40, 10, f"Audit: {d.get('ent')}")
-            pdf.ln(20)
-            pdf.set_font("Arial", "", 12)
-            pdf.cell(40, 10, f"Valorisation: {d.get('valo',0):,.0f} EUR")
-            pdf.ln(10)
-            pdf.cell(40, 10, f"Score Risque 2030: {d.get('s30',0):.2f} / 5")
-            
-            html = pdf.output(dest='S').encode('latin-1', 'replace')
-            st.download_button("Télécharger le Rapport PDF", html, file_name="Rapport.pdf")
-
-    else:
-        st.info("👈 Importez un PDF à gauche pour voir la magie opérer.")
-        st.write("En attente de données...")
-        
