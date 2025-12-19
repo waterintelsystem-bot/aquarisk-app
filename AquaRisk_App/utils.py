@@ -32,7 +32,7 @@ def init_session():
         's24': 2.5, 's30': 3.0, 'var_amount': 0.0,
         'lat': 48.8566, 'lon': 2.3522,
         'climat_calcule': False,
-        'map_id': 0,
+        'map_id': 0, # IMPORTANT POUR LE GPS
         # Risques 360
         'vol_eau': 50000.0, 'prix_eau': 4.5,
         'part_fournisseur_risk': 30.0, 'energie_conso': 100000.0,
@@ -43,7 +43,7 @@ def init_session():
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
 
-# --- SECTEURS & CONSTANTES ---
+# --- SECTEURS & PARAMETRES ---
 SECTEURS = {
     "Agroalimentaire (100%)": 1.0, "Mines & Métaux (90%)": 0.9,
     "Chimie (85%)": 0.85, "Industrie (80%)": 0.8,
@@ -54,7 +54,7 @@ SECTEURS = {
 SECTEURS_LISTE = list(SECTEURS.keys())
 HEADERS = {'User-Agent': 'AquaRisk/1.0'}
 
-# --- CALCUL CLIMAT DYNAMIQUE (C'était la fonction manquante !) ---
+# --- CALCUL CLIMAT DYNAMIQUE ---
 def calculate_dynamic_score(lat, lon):
     # Score basé sur la latitude + variation pseudo-aléatoire stable
     base = 2.0 + (abs(lat) / 60.0)
@@ -92,7 +92,7 @@ def calculate_360_risks(data, params):
 def calculate_water_footprint(data):
     return data['vol_eau'] + (data['ca'] * 0.02)
 
-# --- APIS (PAPPERS / YAHOO) ---
+# --- APIS ---
 def get_pappers_data(query, api_key):
     if not api_key: return None, "Clé manquante"
     try:
@@ -146,10 +146,11 @@ def run_ocr_scan(file_obj):
     except: pass
     return stats, "OK" if stats['found'] else "Rien trouvé"
 
-# --- WIKI ---
+# --- WIKI (CORRIGÉ) ---
 def get_wiki_summary(name):
     try:
-        clean = re.sub(r'\s(SA|SAS|SARL|INC)', '', name, re.IGNORECASE).strip()
+        # CORRECTION ICI : flags=re.IGNORECASE pour éviter l'AttributeError
+        clean = re.sub(r'\s(SA|SAS|SARL|INC)', '', name, flags=re.IGNORECASE).strip()
         search = requests.get("https://fr.wikipedia.org/w/api.php", params={"action":"query","list":"search","srsearch":clean,"format":"json"}, headers=HEADERS, timeout=5).json()
         if not search.get('query',{}).get('search'): return "Pas de page Wiki."
         title = search['query']['search'][0]['title']
@@ -157,8 +158,20 @@ def get_wiki_summary(name):
         return r.json().get('extract', "Pas de résumé.")
     except: return "Erreur Wiki."
 
-# --- PDF GENERATOR ---
+# --- PDF GENERATOR (SECURISE) ---
 def generate_pdf_report(data):
+    # Image
+    temp_path = None
+    try:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.plot(['2024', '2030'], [data.get('s24', 2.5), data.get('s30', 3.0)], 'r-o', lw=2)
+        ax.set_title("Risque Eau"); ax.set_ylim(0, 5); ax.grid(True)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            plt.savefig(tmp.name, format='png', dpi=100); temp_path = tmp.name
+        plt.close(fig)
+    except: pass
+
+    # PDF
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 20); pdf.cell(0, 20, "RAPPORT D'AUDIT 360", ln=1, align='C')
@@ -170,9 +183,18 @@ def generate_pdf_report(data):
     pdf.cell(0, 10, f"Risque Climat 2030: {data.get('s30',0):.2f}/5", ln=1)
     pdf.cell(0, 10, f"Impact VaR: -{abs(data.get('var_amount',0)):,.0f} EUR", ln=1)
     
+    if temp_path:
+        try: pdf.image(temp_path, x=50, w=100); os.remove(temp_path)
+        except: pass
+
     pdf.ln(10)
     pdf.multi_cell(0, 5, f"Resume:\n{str(data.get('wiki_summary',''))[:2000]}")
-    return pdf.output(dest='S').encode('latin-1', 'replace')
+    
+    # SORTIE SECURISEE (Bytes ou String selon version)
+    val = pdf.output(dest='S')
+    if isinstance(val, str):
+        return val.encode('latin-1', 'replace')
+    return val
 
 def generate_excel(data):
     output = io.BytesIO()
