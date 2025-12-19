@@ -24,8 +24,8 @@ from staticmap import StaticMap, CircleMarker
 # ==============================================================================
 # 1. CONFIGURATION & STATE
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk V15.3 : Stable", page_icon="🛡️", layout="wide")
-st.title("🛡️ AquaRisk V15.3 : Version Blindée (Données & API)")
+st.set_page_config(page_title="AquaRisk V15.4 : Final", page_icon="💎", layout="wide")
+st.title("💎 AquaRisk V15.4 : Audit Financier, Climatique & Documentaire")
 
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 if 'pappers_data' not in st.session_state: st.session_state.pappers_data = None
@@ -33,46 +33,26 @@ if 'live_multiples' not in st.session_state: st.session_state.live_multiples = N
 if 'stock_data' not in st.session_state: st.session_state.stock_data = {"mcap": 0, "ev": 0}
 
 # ==============================================================================
-# 2. CHARGEMENT DATA (AVEC SÉCURITÉ RENFORCÉE)
+# 2. CHARGEMENT DATA (RISQUE EAU)
 # ==============================================================================
 @st.cache_data
 def load_data():
-    # Données par défaut si le CSV plante ou n'existe pas
-    DEFAULT_DATA = pd.DataFrame({
-        'name_0': ['France', 'United States', 'Germany', 'China', 'India', 'Brazil', 'United Kingdom'],
-        'name_1': ['Ile-de-France', 'California', 'Bavaria', 'Beijing', 'Maharashtra', 'Sao Paulo', 'London'],
-        'score': [2.5, 3.8, 2.2, 4.1, 4.5, 2.8, 1.9]
-    })
-
     def smart_read(filename):
         if not os.path.exists(filename): return None
         try:
-            # Essai lecture standard
-            df = pd.read_csv(filename, sep=None, engine='python', on_bad_lines='skip')
+            df = pd.read_csv(filename, sep=',', engine='python', on_bad_lines='skip')
             df.columns = [c.lower().strip() for c in df.columns]
-            
-            # Vérification des colonnes vitales
-            required = ['name_0', 'score']
-            if not all(col in df.columns for col in required):
-                return None # Fichier invalide, on rejette
-            
             return df
         except: return None
 
-    # Chargement Actuel
     df_now = smart_read("risk_actuel.csv")
-    if df_now is None:
-        df_now = DEFAULT_DATA # On utilise les données de secours
-    else:
+    if df_now is None: 
+        df_now = pd.DataFrame({'name_0': ['France'], 'name_1': ['Ile-de-France'], 'score': [2.5]})
+    elif 'score' in df_now.columns:
         df_now['score'] = pd.to_numeric(df_now['score'].astype(str).str.replace(',', '.'), errors='coerce')
 
-    # Chargement Futur
     df_fut = smart_read("risk_futur.csv")
-    if df_fut is None:
-        # On simule le futur avec le présent + 10% de risque
-        df_fut = df_now.copy()
-        df_fut['score'] = df_fut['score'] * 1.1
-    else:
+    if df_fut is not None and 'score' in df_fut.columns:
         df_fut['score'] = pd.to_numeric(df_fut['score'].astype(str).str.replace(',', '.'), errors='coerce')
         if 'year' in df_fut.columns:
             df_fut = df_fut[(df_fut['year'] == 2030) & (df_fut['scenario'] == 'bau')]
@@ -84,15 +64,15 @@ try:
 except: st.stop()
 
 # ==============================================================================
-# 3. OUTILS API (PAPPERS & YAHOO)
+# 3. OUTILS API (PAPPERS, YAHOO, METEO, ETC.)
 # ==============================================================================
 
+# --- PAPPERS ---
 def get_pappers_financials(company_name, api_key):
     if not api_key: return None
     try:
-        clean_key = api_key.strip()
         q = urllib.parse.quote(company_name)
-        
+        clean_key = api_key.strip()
         # 1. Recherche
         r = requests.get(f"https://api.pappers.fr/v2/recherche?q={q}&api_token={clean_key}&par_page=1", timeout=5)
         if r.status_code != 200 or not r.json().get('resultats'): return None
@@ -119,37 +99,50 @@ def get_pappers_financials(company_name, api_key):
         return {"nom": match['nom_entreprise'], "ca": ca, "resultat": res, "capitaux": cap, "ebitda": ebitda, "annee": annee}
     except: return None
 
+# --- YAHOO FINANCE ---
 def get_stock_advanced(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.fast_info
         mcap = info.get('market_cap', 0)
-        # Fallback classique
         if not mcap: mcap = stock.info.get('marketCap', 0)
         ev = stock.info.get('enterpriseValue', mcap)
         return mcap, ev
     except: return 0, 0
 
-# ==============================================================================
-# 4. GÉOGRAPHIE & INTELLIGENCE
-# ==============================================================================
+# --- GPS ---
 class MockLocation:
     def __init__(self, lat, lon): self.latitude = lat; self.longitude = lon
 
 def get_location_safe(ville, pays):
-    # Base de secours
-    fallback = {"paris": (48.8566, 2.3522), "lyon": (45.7640, 4.8357), "marseille": (43.2965, 5.3698), "bordeaux": (44.8378, -0.5792), "new york": (40.7128, -74.0060)}
+    fallback = {"paris": (48.8566, 2.3522), "lyon": (45.7640, 4.8357), "marseille": (43.2965, 5.3698), "bordeaux": (44.8378, -0.5792)}
     clean_v = ville.lower().strip()
     if clean_v in fallback: return MockLocation(*fallback[clean_v])
 
     for i in range(2):
         try:
-            ua = f"AR_V153_{randint(1000,9999)}"
+            ua = f"AR_V154_{randint(1000,9999)}"
             loc = Nominatim(user_agent=ua, timeout=5).geocode(f"{ville}, {pays}", language='en')
             if loc: return loc
         except: time.sleep(1); continue
     return MockLocation(48.8566, 2.3522)
 
+# --- MÉTÉO (LA FONCTION MANQUANTE EST ICI !) ---
+def get_weather_history(lat, lon):
+    if not lat or not lon: return "N/A"
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+    url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start}&end_date={end}&daily=precipitation_sum&timezone=auto"
+    try:
+        r = requests.get(url, timeout=5)
+        d = r.json()
+        if 'daily' in d and 'precipitation_sum' in d['daily']:
+            val = sum([x for x in d['daily']['precipitation_sum'] if x is not None])
+            return f"{val:.0f}"
+    except: return "N/A"
+    return "N/A"
+
+# --- WEB & NEWS ---
 def get_company_news(company_name):
     q = urllib.parse.quote(f'"{company_name}" (eau OR pollution OR environnement)')
     try:
@@ -182,7 +175,7 @@ def extract_text_from_pdfs(uploaded_files):
     return txt, names
 
 # ==============================================================================
-# 5. MOTEUR ANALYSE
+# 4. MOTEUR ANALYSE
 # ==============================================================================
 def analyser_risque_geo(ville, pays):
     loc = get_location_safe(ville, pays)
@@ -211,7 +204,7 @@ def analyser_risque_geo(ville, pays):
     }
 
 # ==============================================================================
-# 6. PDF & CARTE
+# 5. PDF
 # ==============================================================================
 def generer_carte(lat, lon):
     try:
@@ -229,7 +222,7 @@ def create_pdf(data, corpus, notes):
     
     # Header
     pdf.set_font("Arial", 'B', 18)
-    pdf.cell(0, 10, clean(f"AUDIT V15.3: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
+    pdf.cell(0, 10, clean(f"AUDIT V15.4: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
     pdf.ln(10)
     
     # Carte
@@ -270,7 +263,7 @@ def create_pdf(data, corpus, notes):
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
 # ==============================================================================
-# 7. INTERFACE
+# 6. INTERFACE
 # ==============================================================================
 with st.sidebar:
     st.header("⚙️ Config")
@@ -351,6 +344,8 @@ with c1:
                 news = get_company_news(ent)
                 wiki = get_wiki_summary(ent)
                 web = scan_website(website)
+                # APPEL DE LA FONCTION METEO RÉINTÉGRÉE
+                pluie = get_weather_history(res['lat'], res['lon'])
                 doc_txt, doc_n = extract_text_from_pdfs(uploaded_docs)
                 
                 corpus = f"{notes} {web} {wiki} {doc_txt} {' '.join([n['title'] for n in news])}"
@@ -370,7 +365,7 @@ with c1:
                     "s2024": res['s2024'], "s2026": res['s2026'], "s2030": res['s2030'],
                     "var_2030": var30, "var_2026": var26,
                     "news": news, "doc_files": doc_n, "txt_ia": txt_ia,
-                    "pluie_90j": get_weather_history(res['lat'], res['lon']),
+                    "pluie_90j": pluie,
                     "full_text": corpus
                 }
                 st.session_state.audit_unique = final
