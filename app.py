@@ -24,8 +24,8 @@ from staticmap import StaticMap, CircleMarker
 # ==============================================================================
 # 1. CONFIGURATION
 # ==============================================================================
-st.set_page_config(page_title="AquaRisk V16 : Stable & Complet", page_icon="🛡️", layout="wide")
-st.title("🛡️ AquaRisk V16 : Audit Financier, Climatique & Documentaire")
+st.set_page_config(page_title="AquaRisk V16.1 : Final", page_icon="💎", layout="wide")
+st.title("💎 AquaRisk V16.1 : Audit Financier, Climatique & Documentaire")
 
 if 'audit_unique' not in st.session_state: st.session_state.audit_unique = None
 if 'pappers_data' not in st.session_state: st.session_state.pappers_data = None
@@ -33,11 +33,11 @@ if 'live_multiples' not in st.session_state: st.session_state.live_multiples = N
 if 'stock_data' not in st.session_state: st.session_state.stock_data = {"mcap": 0, "ev": 0}
 
 # ==============================================================================
-# 2. CHARGEMENT DATA (BLINDAGE ANTI-CRASH)
+# 2. CHARGEMENT DATA (CORRIGÉ : PLUS DE UI DANS LE CACHE)
 # ==============================================================================
 @st.cache_data
 def load_data():
-    # Données de secours (Hardcoded) si le CSV plante
+    # Données de secours
     BACKUP_DATA = pd.DataFrame({
         'name_0': ['France', 'United States', 'Germany', 'China', 'India', 'Brazil', 'United Kingdom', 'Italy', 'Spain'],
         'name_1': ['Ile-de-France', 'California', 'Bavaria', 'Beijing', 'Maharashtra', 'Sao Paulo', 'London', 'Lombardy', 'Madrid'],
@@ -47,13 +47,10 @@ def load_data():
     def smart_read(filename):
         if not os.path.exists(filename): return None
         try:
-            # On tente de lire avec plusieurs séparateurs
             for sep in [',', ';', '\t']:
                 try:
                     df = pd.read_csv(filename, sep=sep, engine='python', on_bad_lines='skip')
-                    # Nettoyage des noms de colonnes
                     df.columns = [c.lower().strip() for c in df.columns]
-                    # Vérification CRITIQUE : est-ce que la colonne name_0 existe ?
                     if 'name_0' in df.columns and 'score' in df.columns:
                         return df
                 except: continue
@@ -63,15 +60,14 @@ def load_data():
     # 1. Chargement Actuel
     df_now = smart_read("risk_actuel.csv")
     if df_now is None:
-        st.toast("⚠️ Fichier 'risk_actuel.csv' invalide ou absent. Utilisation des données de secours.", icon="🛠️")
-        df_now = BACKUP_DATA # On bascule sur le backup
+        # CORRECTION : Pas de st.toast ici !
+        df_now = BACKUP_DATA
     else:
         df_now['score'] = pd.to_numeric(df_now['score'].astype(str).str.replace(',', '.'), errors='coerce')
 
     # 2. Chargement Futur
     df_fut = smart_read("risk_futur.csv")
     if df_fut is None:
-        # Si pas de futur, on projette le présent +10%
         df_fut = df_now.copy()
         df_fut['score'] = df_fut['score'] * 1.1
     else:
@@ -94,7 +90,6 @@ class MockLocation:
     def __init__(self, lat, lon): self.latitude = lat; self.longitude = lon
 
 def get_location_safe(ville, pays):
-    # Base de secours GPS
     fallback = {
         "paris": (48.8566, 2.3522), "lyon": (45.7640, 4.8357), "marseille": (43.2965, 5.3698),
         "bordeaux": (44.8378, -0.5792), "toulouse": (43.6047, 1.4442), "lille": (50.6292, 3.0573),
@@ -106,34 +101,41 @@ def get_location_safe(ville, pays):
 
     for i in range(2):
         try:
-            ua = f"AR_V16_{randint(1000,9999)}"
+            ua = f"AR_V161_{randint(1000,9999)}"
             loc = Nominatim(user_agent=ua, timeout=6).geocode(f"{ville}, {pays}")
             if loc: return loc
         except: time.sleep(1); continue
-    return MockLocation(48.8566, 2.3522) # Default Paris
+    return MockLocation(48.8566, 2.3522)
 
 def get_pappers_financials(company_name, api_key):
     if not api_key: return None
     try:
         clean_key = api_key.strip()
         q = urllib.parse.quote(company_name)
-        # Recherche
+        # 1. Recherche
         r = requests.get(f"https://api.pappers.fr/v2/recherche?q={q}&api_token={clean_key}&par_page=1", timeout=5)
-        if r.status_code != 200 or not r.json().get('resultats'): return None
-        match = r.json()['resultats'][0]
+        if r.status_code != 200: return None # Gestion erreur clé silencieuse
+        data = r.json()
+        if not data.get('resultats'): return None
+        
+        match = data['resultats'][0]
         siren = match['siren']
-        # Bilan
+        
+        # 2. Bilan
         f_r = requests.get(f"https://api.pappers.fr/v2/entreprise?api_token={clean_key}&siren={siren}", timeout=5)
+        if f_r.status_code != 200: return None
         f_data = f_r.json()
-        ca=0; res=0; cap=0; annee="N/A"
+        
+        ca=0; res=0; cap=0; ebitda=0; annee="N/A"
         for c in f_data.get('finances', []):
             if c.get('annee_cloture_exercice'):
                 ca = c.get('chiffre_affaires', 0) or 0
                 res = c.get('resultat', 0) or 0
                 cap = c.get('capitaux_propres', 0) or 0
+                ebitda = res * 1.25 if res > 0 else 0 
                 annee = c['annee_cloture_exercice']
                 break
-        return {"nom": match['nom_entreprise'], "ca": ca, "resultat": res, "capitaux": cap, "annee": annee}
+        return {"nom": match['nom_entreprise'], "ca": ca, "resultat": res, "capitaux": cap, "ebitda": ebitda, "annee": annee}
     except: return None
 
 def get_stock_advanced(ticker):
@@ -161,10 +163,23 @@ def get_company_news(company_name):
         return [{"title": e.title, "link": e.link, "summary": e.summary[:200]} for e in feed.entries[:5]]
     except: return []
 
-def extract_text_from_pdfs(files):
+def get_wiki_summary(company_name):
+    wikipedia.set_lang('fr')
+    try: return wikipedia.page(company_name).summary[:1000]
+    except: return ""
+
+def scan_website(url):
+    if len(url) < 5: return ""
+    if not url.startswith("http"): url = "https://" + url
+    try:
+        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        return ' '.join([p.text for p in BeautifulSoup(r.text, 'html.parser').find_all('p')])[:5000]
+    except: return ""
+
+def extract_text_from_pdfs(uploaded_files):
     txt = ""; names = []
-    if not files: return "", []
-    for f in files:
+    if not uploaded_files: return "", []
+    for f in uploaded_files:
         try:
             with pdfplumber.open(f) as pdf:
                 for p in pdf.pages[:10]: txt += p.extract_text() or ""
@@ -181,7 +196,7 @@ def analyser_risque_geo(ville, pays):
     # Matching
     liste_pays = df_actuel['name_0'].unique()
     match_pays, score = process.extractOne(str(pays), liste_pays.astype(str))
-    if score < 60: match_pays = pays # Garde l'original si pas trouvé
+    if score < 60: match_pays = pays
 
     # Scores
     s24 = 2.5
@@ -202,7 +217,7 @@ def analyser_risque_geo(ville, pays):
     }
 
 # ==============================================================================
-# 5. PDF
+# 5. PDF & CARTE
 # ==============================================================================
 def generer_carte(lat, lon):
     try:
@@ -220,7 +235,7 @@ def create_pdf(data, corpus, notes):
     
     # Header
     pdf.set_font("Arial", 'B', 18)
-    pdf.cell(0, 10, clean(f"AUDIT V16: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
+    pdf.cell(0, 10, clean(f"AUDIT V16.1: {data.get('ent', 'N/A').upper()}"), ln=1, align='C')
     pdf.ln(10)
     
     # Carte
@@ -268,7 +283,7 @@ with st.sidebar:
     pappers_key = st.text_input("Clé Pappers", type="password")
     if st.button("Actualiser Taux"):
         st.session_state.live_multiples = {"Logiciel": {"ca": 5.5, "ebitda": 18.0}, "Industrie": {"ca": 0.8, "ebitda": 7.0}}
-        st.success("Taux mis à jour")
+        st.success("Taux mis à jour (Simulé)")
 
 c1, c2 = st.columns([1, 2])
 
@@ -281,16 +296,15 @@ with c1:
     
     st.markdown("---")
     st.subheader("2. Finance")
-    mode_val = st.radio("Type", ["Non Cotée", "Cotée", "Startup (VC)"]) # RESTAURATION OPTION STARTUP
+    mode_val = st.radio("Type", ["Non Cotée", "Cotée", "Startup"])
     valeur_finale = 0.0
     source_info = "Manuel"
     
-    # Vulnérabilité (IMPACT EAU RÉINTÉGRÉ)
-    secteur_risk = st.selectbox("Secteur (Vulnérabilité)", ["Agroalimentaire (High Risk)", "Industrie (Med Risk)", "BTP", "Commerce", "Logiciel (Low Risk)"])
-    vuln_factor = {"Agroalimentaire": 1.0, "Industrie": 0.7, "BTP": 0.4, "Commerce": 0.2, "Logiciel": 0.05}.get(secteur_risk.split()[0], 0.5)
+    # Vulnérabilité
+    secteur_risk = st.selectbox("Secteur (Vulnérabilité)", ["Agroalimentaire", "Industrie", "BTP", "Commerce", "Logiciel"])
+    vuln_factor = {"Agroalimentaire": 1.0, "Industrie": 0.7, "BTP": 0.4, "Commerce": 0.2, "Logiciel": 0.05}.get(secteur_risk, 0.5)
 
-    # --- LOGIQUE NON COTÉE ---
-    if "Non Cotée" in mode_val:
+    if mode_val == "Non Cotée":
         if st.button("🔍 Pappers"):
             with st.spinner("API..."):
                 i = get_pappers_financials(ent, pappers_key)
@@ -324,26 +338,15 @@ with c1:
         valeur_finale = st.number_input("Valo Retenue", value=val_calc)
         source_info = m_pme
 
-    # --- LOGIQUE COTÉE ---
-    elif "Cotée" in mode_val:
+    elif mode_val == "Cotée":
         ticker = st.text_input("Ticker", "BN.PA")
-        ind = st.selectbox("Indicateur", ["Market Cap", "Enterprise Value"])
         if st.button("Yahoo"):
             m, e = get_stock_advanced(ticker)
-            if m > 0: st.session_state.stock_data = {"mcap":m, "ev":e}
-        
-        ref = st.session_state.stock_data.get('mcap', 0)
-        if ind == "Enterprise Value": ref = st.session_state.stock_data.get('ev', 0)
-        valeur_finale = st.number_input("Valo Retenue", value=ref if ref > 0 else 1000000.0)
-        source_info = f"Bourse {ticker}"
-
-    # --- LOGIQUE STARTUP (RÉINTÉGRÉE) ---
+            if m > 0: st.session_state.stock_data = {"mcap": m, "ev": e}
+        valeur_finale = st.number_input("Valo", value=st.session_state.stock_data['mcap'])
+    
     else: # Startup
-        stade = st.selectbox("Stade Maturité", ["Seed (3-8M)", "Series A (10-30M)", "Series B (30-80M)"])
-        ranges = {"Seed": (3e6, 8e6), "Series A": (1e7, 3e7), "Series B": (3e7, 8e7)}
-        min_v, max_v = ranges.get(stade.split()[0], (1e6, 5e6))
-        valeur_finale = st.slider("Valorisation ($)", min_v, max_v, (min_v+max_v)/2)
-        source_info = f"VC {stade}"
+        valeur_finale = st.slider("Valo", 1000000.0, 50000000.0, 5000000.0)
 
     st.markdown("---")
     st.write("📂 **3. Data Room**")
@@ -355,10 +358,12 @@ with c1:
             res = analyser_risque_geo(v, p)
             if res['found']:
                 news = get_company_news(ent)
+                wiki = get_wiki_summary(ent)
+                web = scan_website(website)
                 pluie = get_weather_history(res['lat'], res['lon'])
                 doc_txt, doc_n = extract_text_from_pdfs(uploaded_docs)
                 
-                corpus = f"{notes} {doc_txt} {' '.join([n['title'] for n in news])}"
+                corpus = f"{notes} {web} {wiki} {doc_txt} {' '.join([n['title'] for n in news])}"
                 
                 d26 = max(0, res['s2026'] - 1.5)
                 d30 = max(0, res['s2030'] - 1.5)
