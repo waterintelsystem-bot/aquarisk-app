@@ -114,4 +114,5 @@ def get_weather_history(lat, lon):
         d = r.json()
         if 'daily' in d and 'precipitation_sum' in d['daily']:
             return sum
-            
+
+
