@@ -10,72 +10,67 @@ except: pass
 utils.init_session()
 st.title("🌍 Climat & Risques")
 
-# Vérification Finance
 if st.session_state.get('valo_finale', 0) == 0:
-    st.error("⚠️ Valo = 0 €. Allez dans l'onglet Finance.")
+    st.error("⚠️ Valorisation à 0 €. Veuillez compléter l'onglet Finance.")
 else:
-    st.info(f"Analyse : {st.session_state['ent_name']} ({st.session_state['valo_finale']:,.0f} €)")
+    st.info(f"Dossier : {st.session_state['ent_name']} ({st.session_state['valo_finale']:,.0f} €)")
 
-# Saisie Ville
-c1, c2 = st.columns(2)
-# On utilise des clés uniques pour que le champ soit indépendant
-new_ville = c1.text_input("Ville", value=st.session_state['ville'], key="input_ville")
-new_pays = c2.text_input("Pays", value=st.session_state['pays'], key="input_pays")
+# --- FORMULAIRE DE SAISIE (C'EST LE SECRET POUR QUE ÇA MARCHE) ---
+# Le formulaire empêche le rechargement intempestif
+with st.form("gps_form"):
+    c1, c2 = st.columns(2)
+    # On initialise avec la valeur mémoire, mais on laisse l'utilisateur changer
+    in_ville = c1.text_input("Ville", value=st.session_state['ville'])
+    in_pays = c2.text_input("Pays", value=st.session_state['pays'])
+    
+    submitted = st.form_submit_button("⚡ ACTUALISER LOCALISATION & RISQUES")
 
-# BOUTON QUI DECLENCHE TOUT
-if st.button("⚡ ACTUALISER DONNEES & CARTE", type="primary"):
-    
-    # 1. Incrémenter l'ID pour forcer la nouvelle carte
-    st.session_state['map_id'] = st.session_state.get('map_id', 0) + 1
-    
-    # 2. Sauvegarde des inputs
-    st.session_state['ville'] = new_ville
-    st.session_state['pays'] = new_pays
+if submitted:
+    # 1. Mise à jour Mémoire
+    st.session_state['ville'] = in_ville
+    st.session_state['pays'] = in_pays
     st.session_state['climat_calcule'] = True
     
-    with st.spinner("Mise à jour GPS & Scores..."):
-        # A. GPS
-        found = False
-        lat, lon = 48.85, 2.35 # Paris défaut
+    # 2. GPS
+    found = False
+    with st.spinner(f"Recherche GPS pour {in_ville}..."):
         try:
-            ua = f"AR_{randint(1000,9999)}"
+            ua = f"AquaRisk_Agent_{randint(100,99999)}"
             geo = Nominatim(user_agent=ua)
-            loc = geo.geocode(f"{new_ville}, {new_pays}", timeout=8)
+            loc = geo.geocode(f"{in_ville}, {in_pays}", timeout=10)
             if loc:
-                lat, lon = loc.latitude, loc.longitude
-                st.session_state['lat'] = lat
-                st.session_state['lon'] = lon
+                st.session_state['lat'] = loc.latitude
+                st.session_state['lon'] = loc.longitude
                 found = True
-                st.success(f"📍 GPS OK : {lat:.4f}, {lon:.4f}")
+                st.success(f"Trouvé: {loc.address}")
             else:
-                st.warning("GPS Introuvable (Carte centrée sur Paris)")
-        except: pass
-        
-        # B. SCORES DYNAMIQUES
-        # On appelle la fonction de utils qui était manquante avant
-        s24, s30 = utils.calculate_dynamic_score(lat, lon)
+                st.error("Ville introuvable. Essai par défaut (Paris).")
+        except Exception as e:
+            st.error(f"Erreur GPS : {e}")
+
+        # 3. Calculs
+        s24, s30 = utils.calculate_dynamic_score(st.session_state['lat'], st.session_state['lon'])
         st.session_state['s24'] = s24
         st.session_state['s30'] = s30
         
-        # C. VAR (Impact Financier)
+        # VaR
         try:
-            secteur_txt = st.session_state.get('secteur', '')
+            s_txt = st.session_state.get('secteur', '')
             import re
-            match = re.search(r'\((\d+)%\)', secteur_txt)
-            vuln = int(match.group(1))/100.0 if match else 0.5
+            vuln = int(re.search(r'\((\d+)%\)', s_txt).group(1))/100.0
         except: vuln = 0.5
         
         val = st.session_state.get('valo_finale', 0)
         st.session_state['var_amount'] = val * ((s30 - s24)/5.0) * vuln
         
-        # D. WIKI
+        # Wiki
         st.session_state['wiki_summary'] = utils.get_wiki_summary(st.session_state['ent_name'])
 
-    # 3. RECHARGEMENT FORCE DE LA PAGE
-    if found:
-        st.rerun()
+    # 4. Force Redraw Carte
+    st.session_state['map_id'] = st.session_state.get('map_id', 0) + 1
+    if found: st.rerun()
 
-# AFFICHAGE RESULTATS
+# --- AFFICHAGE RESULTATS ---
 if st.session_state.get('climat_calcule'):
     st.divider()
     
@@ -85,17 +80,14 @@ if st.session_state.get('climat_calcule'):
     k3.metric("VaR (Impact)", f"-{st.session_state['var_amount']:,.0f} €", delta_color="inverse")
 
     map_col, graph_col = st.columns(2)
-    
     with map_col:
-        # L'ASTUCE EST ICI : key=...map_id
-        # Si map_id change, Streamlit jette la vieille carte et en fait une neuve
-        unique_key = f"map_render_{st.session_state['map_id']}"
-        
+        # Clé unique pour forcer le rafraichissement
+        unique_key = f"map_{st.session_state['map_id']}"
         m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=11)
         folium.Marker(
             [st.session_state['lat'], st.session_state['lon']], 
             popup=st.session_state['ent_name'],
-            icon=folium.Icon(color='red', icon='warning')
+            icon=folium.Icon(color='red', icon='info-sign')
         ).add_to(m)
         st_folium(m, height=300, use_container_width=True, key=unique_key)
         
