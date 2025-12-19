@@ -44,46 +44,18 @@ def init_session():
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
 
-# --- 2. LISTE COMPLETE DES SECTEURS (NOUVEAU) ---
 SECTEURS = {
-    # TRES HAUT RISQUE (0.9 - 1.0)
-    "Agroalimentaire / Boissons (100%)": 1.0,
-    "Agriculture / Élevage (100%)": 1.0,
-    "Semi-conducteurs / Puces (95%)": 0.95,
-    "Mines & Extraction (90%)": 0.9,
-    "Papier & Carton (90%)": 0.9,
-    
-    # HAUT RISQUE (0.7 - 0.85)
-    "Chimie / Pétrochimie (85%)": 0.85,
-    "Textile / Cuir / Habillement (80%)": 0.8,
-    "Industrie Lourde / Métallurgie (80%)": 0.8,
-    "Énergie (Thermique/Nucléaire) (75%)": 0.75,
-    "Data Centers / Cloud (70%)": 0.7,
-    "Matériaux de Construction (Ciment) (70%)": 0.7,
-    
-    # RISQUE MOYEN (0.4 - 0.6)
-    "Pharmaceutique / Biotech (60%)": 0.6,
-    "BTP / Construction (60%)": 0.6,
-    "Automobile (Fabrication) (55%)": 0.55,
-    "Tourisme / Hôtellerie / Loisirs (50%)": 0.5,
-    "Transport / Logistique (50%)": 0.5,
-    "Luxe / Cosmétiques (45%)": 0.45,
-    "Commerce de Détail / Retail (40%)": 0.4,
-    "Immobilier (Exploitation) (40%)": 0.4,
-    
-    # RISQUE FAIBLE (0.1 - 0.3)
-    "Électronique Grand Public (30%)": 0.3,
-    "Santé / Hôpitaux (30%)": 0.3,
-    "Télécoms (Réseau) (25%)": 0.25,
-    "Banque / Assurance (15%)": 0.15,
-    "Services / Logiciel / IT (10%)": 0.1,
-    "Consulting / Audit (5%)": 0.05,
-    "Autre (50%)": 0.5
+    "Agroalimentaire (100%)": 1.0, "Mines & Métaux (90%)": 0.9,
+    "Chimie (85%)": 0.85, "Industrie (80%)": 0.8,
+    "Énergie (75%)": 0.75, "Textile (80%)": 0.8,
+    "BTP (60%)": 0.6, "Transport (50%)": 0.5,
+    "Services (10%)": 0.1, "Automobile (55%)": 0.55,
+    "Tech / Software (10%)": 0.1, "Semi-conducteurs (95%)": 0.95
 }
 SECTEURS_LISTE = list(SECTEURS.keys())
 HEADERS = {'User-Agent': 'AquaRisk/1.0'}
 
-# --- 3. CALCULS ---
+# --- 2. FONCTIONS CALCULS ---
 def calculate_dynamic_score(lat, lon):
     base = 2.0 + (abs(lat) / 60.0)
     random.seed(int(lat*1000) + int(lon*1000))
@@ -96,44 +68,60 @@ def calculate_360_risks(data, params):
     risks = {}
     delta_prix = data['prix_eau'] * (params['hausse_eau_pct'] / 100.0)
     risks['Coût Eau (Exploitation)'] = data['vol_eau'] * delta_prix
-
     achats = data['ca'] * 0.40
     part_exposee = achats * (data['part_fournisseur_risk'] / 100.0)
-    risks['Supply Chain (Rupture)'] = part_exposee * (params['impact_geopolitique'] / 100.0)
-
+    risks['Supply Chain'] = part_exposee * (params['impact_geopolitique'] / 100.0)
     if not data['reut_invest']:
         vol_jour = data['vol_eau'] / 300
         risks['Conformité (CAPEX)'] = (vol_jour * 1500.0) * (params['pression_legale'] / 100.0)
     else: risks['Conformité (CAPEX)'] = 0.0
-
     risks['Réputation (Valo)'] = data['valo_finale'] * (params['risque_image'] / 100.0)
     risks['Énergie'] = (data['energie_conso'] * 0.15) * (params['hausse_energie'] / 100.0)
-    
     return risks, sum(risks.values())
 
 def calculate_water_footprint(data):
     return data['vol_eau'] + (data['ca'] * 0.02)
 
-# --- 4. DATA EXTERNE (YAHOO CORRIGÉ) ---
+# --- 3. DATA EXTERNE (YAHOO FIXÉ) ---
 def get_yahoo_data(ticker):
-    """Récupère les données Bourse en renvoyant TOUJOURS 4 valeurs"""
+    """
+    Cherche d'abord le ticker EXACT (ex: TSLA).
+    Si échoue, cherche avec .PA (ex: AIR.PA).
+    """
+    ticker = ticker.strip().upper()
+    
+    # 1. Tentative EXACTE (Pour US & International)
     try:
         t = yf.Ticker(ticker)
-        try: name = t.info.get('longName') or t.info.get('shortName')
-        except: name = None
+        # fast_info est plus rapide et plante moins que .info
+        mcap = t.fast_info.market_cap
         
-        # Si pas de nom, on tente avec .PA
-        if not name and not ticker.endswith(".PA"):
-             return get_yahoo_data(ticker + ".PA")
-        
-        mcap = t.info.get('marketCap') or t.fast_info.get('market_cap')
-        sector = t.info.get('sector', 'N/A')
-        
-        # Le return doit contenir exactement 4 éléments
-        return float(mcap or 0), name, sector, ticker
-    except: 
-        # En cas d'erreur totale, on renvoie des valeurs vides mais au bon format
-        return 0.0, None, None, None
+        if mcap and mcap > 0:
+            # On essaie de récupérer le nom, sinon on prend le ticker
+            try: name = t.info.get('longName') or t.info.get('shortName') or ticker
+            except: name = ticker
+            try: sec = t.info.get('sector', 'Tech/Autre')
+            except: sec = "Autre"
+            
+            return float(mcap), name, sec, ticker
+    except: pass
+
+    # 2. Tentative PARIS (.PA) si le premier a échoué
+    if not ticker.endswith(".PA"):
+        try:
+            ticker_pa = ticker + ".PA"
+            t = yf.Ticker(ticker_pa)
+            mcap = t.fast_info.market_cap
+            if mcap and mcap > 0:
+                try: name = t.info.get('longName') or ticker_pa
+                except: name = ticker_pa
+                try: sec = t.info.get('sector', 'Autre')
+                except: sec = "Autre"
+                return float(mcap), name, sec, ticker_pa
+        except: pass
+
+    # Echec total
+    return 0.0, None, None, None
 
 def get_pappers_data(query, api_key):
     if not api_key: return None, "Clé manquante"
@@ -211,7 +199,7 @@ def create_static_map(lat, lon):
             img.save(t.name); return t.name
     except: return None
 
-# --- 5. GENERATEUR PDF ---
+# --- 4. PDF ---
 def generate_pdf_report(data):
     chart_path = None
     try:
@@ -259,7 +247,7 @@ def generate_pdf_report(data):
         pdf.cell(140, 7, "TOTAL RISQUE ESTIME", 1)
         pdf.cell(50, 7, f"-{total:,.0f} EUR", 1, ln=1)
     else:
-        pdf.cell(0, 7, "Aucune simulation (Voir onglet Risques 360).", 1, ln=1)
+        pdf.cell(0, 7, "Aucune simulation effectuée.", 1, ln=1)
 
     pdf.ln(5)
     pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "SOURCES & CONTEXTE", ln=1)
