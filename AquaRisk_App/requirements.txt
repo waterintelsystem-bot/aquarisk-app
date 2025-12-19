@@ -7,10 +7,10 @@ folium
 streamlit-folium
 feedparser
 xlsxwriter
-thefuzz
 requests
 beautifulsoup4
 lxml
 matplotlib
 staticmap
 Pillow
+geopy
