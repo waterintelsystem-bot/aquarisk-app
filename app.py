@@ -149,6 +149,7 @@ def get_company_news_strict(company_name, country="France"):
     is_france = "france" in country.lower().strip()
     def clean(r): return re.sub(re.compile('<.*?>'), '', r).replace("&nbsp;", " ").replace("&#39;", "'")
     
+    # Mots clés stricts pour éviter le bruit (LGBT, Politique...)
     if is_france:
         q = urllib.parse.quote(f'"{company_name}" (eau OR pollution OR sécheresse OR environnement OR amende)')
         rss_url = f"https://news.google.com/rss/search?q={q}&hl=fr-FR&gl=FR&ceid=FR:fr"
@@ -165,6 +166,7 @@ def get_company_news_strict(company_name, country="France"):
         for e in feed.entries:
             title = e.title.lower()
             summary = clean(e.summary if 'summary' in e else "").lower()
+            # Filtre : Le nom de la boite doit être cité
             if main_keyword not in title and main_keyword not in summary: continue
             
             items.append({
@@ -318,13 +320,15 @@ def create_pdf(data, corpus_text, notes):
     
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, "1. VALORISATION & RISQUE FINANCIER", ln=1)
-    pdf.set_font("Arial", size=11)
     
-    pdf.cell(60, 10, clean(f"Valorisation: {data['valeur_entreprise']:,.0f} $"), border=1)
+    pdf.set_font("Arial", size=11)
+    # Tableau Valeur
+    pdf.cell(60, 10, clean(f"Valuation: {data['valeur_entreprise']:,.0f} $"), border=1)
     pdf.cell(60, 10, clean(f"Methode: {data.get('source_ca', 'Manuel')}"), border=1)
-    pdf.cell(60, 10, clean(f"Perte 2030: {data['var_2030']:,.0f} $"), border=1)
+    pdf.cell(60, 10, clean(f"VaR 2030: {data['var_2030']:,.0f} $"), border=1)
     pdf.ln(15)
     
+    # Tableau Climat
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, "2. TRAJECTOIRE CLIMATIQUE", ln=1)
     pdf.set_font("Arial", size=11)
@@ -342,28 +346,35 @@ def create_pdf(data, corpus_text, notes):
     pdf.cell(0, 10, "3. REVUE DE PRESSE & DATA ROOM", ln=1)
     pdf.ln(5)
     
+    # ARTICLES CLIQUABLES
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "Articles de Presse (Cliquables)", ln=1)
     
     if data['news']:
         for n in data['news']:
+            # Titre Bleu Souligné
             pdf.set_font("Arial", 'U', 10) 
             pdf.set_text_color(0, 0, 255) 
             pdf.cell(0, 6, clean(f">> {n['title']}"), ln=1, link=n['link'])
+            
+            # Résumé Noir
             pdf.set_text_color(0, 0, 0)
             pdf.set_font("Arial", '', 9)
             pdf.multi_cell(0, 5, clean(f"{n['summary']}"))
             pdf.ln(3)
     else:
         pdf.set_font("Arial", 'I', 10)
-        pdf.cell(0, 10, "Aucun article critique detecte.", ln=1)
+        pdf.cell(0, 10, "Aucun signal faible detecte.", ln=1)
     
     pdf.ln(5)
+    
+    # DOCUMENTS & NOTES
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "Analyse Documents & Notes", ln=1)
     pdf.set_font("Arial", size=9)
     if data['doc_files']:
-        pdf.multi_cell(0, 5, clean(f"Fichiers: {', '.join(data['doc_files'])}"))
+        pdf.multi_cell(0, 5, clean(f"Fichiers inclus: {', '.join(data['doc_files'])}"))
+        # Extrait corpus
         extract = corpus_text[:1200].replace('\n', ' ')
         pdf.multi_cell(0, 5, clean(f"Extrait Data Room: {extract}..."))
     
@@ -379,10 +390,10 @@ def create_pdf(data, corpus_text, notes):
 # ==============================================================================
 with st.sidebar:
     st.header("⚙️ Config & API")
-    pappers_key = st.text_input("Clé API Pappers", type="password")
+    pappers_key = st.text_input("Pappers (France)", type="password")
     
     st.markdown("---")
-    st.header("🔄 Marché (Live)")
+    st.header("🔄 Live Market")
     if st.button("Actualiser Taux du Jour"):
         with st.spinner("Connexion Bourses Mondiales..."): 
             st.session_state.live_multiples = calculate_live_multiples()
@@ -399,6 +410,7 @@ with c1:
     st.markdown("---")
     st.subheader("2. Finance & Valorisation")
     
+    # TYPE ENTREPRISE (MENU COMPLET)
     mode_val = st.radio("Type d'Entreprise", ["Cotée (Bourse)", "Non Cotée (PME/ETI)", "Startup (VC)"])
     valeur_finale = 0.0
     source_info = "Manuel"
@@ -449,6 +461,7 @@ with c1:
             i = get_pappers_financials(ent, pappers_key)
             if i: st.session_state.pappers_data = i
         
+        # MENU MÉTHODES COMPLET
         method_pme = st.selectbox("Méthode Valorisation", [
             "1. Multiple du CA (Comparables)",
             "2. Multiple de l'EBITDA (Rentabilité)",
@@ -465,6 +478,7 @@ with c1:
 
         val_calc = 0.0
         
+        # Calculs selon méthode
         if "Multiple" in method_pme:
             secteur_valo = st.selectbox("Secteur (Pour le Multiple)", [
                 "Logiciel (SaaS)", "ESN / Services", "Industrie", 
@@ -527,11 +541,12 @@ with c1:
                 full_corpus = f"{notes_manuelles} {web_txt} {wiki_txt} {doc_text} {' '.join([n['title'] for n in news])}"
                 
                 # VaR avec facteur de vulnérabilité
+                vuln = vuln_factor
                 delta_risk_2026 = max(0, res['s2026'] - 1.5)
                 delta_risk_2030 = max(0, res['s2030'] - 1.5)
                 
-                impact_2026 = valeur_finale * (delta_risk_2026 / 5.0) * vuln_factor
-                impact_2030 = valeur_finale * (delta_risk_2030 / 5.0) * vuln_factor
+                impact_2026 = valeur_finale * (delta_risk_2026 / 5.0) * vuln
+                impact_2030 = valeur_finale * (delta_risk_2030 / 5.0) * vuln
 
                 risk_count = sum(1 for w in ['litige', 'procès', 'amende'] if w in full_corpus.lower())
                 txt_ia = "Situation stable."
