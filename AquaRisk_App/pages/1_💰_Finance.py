@@ -9,20 +9,15 @@ c1, c2 = st.columns(2)
 with c1: 
     st.session_state['ent_name'] = st.text_input("Nom Entreprise", st.session_state['ent_name'])
 with c2: 
-    # Gestion sécurisée de l'index des secteurs
     saved_sec = st.session_state.get('secteur')
-    if saved_sec in utils.SECTEURS_LISTE:
-        idx = utils.SECTEURS_LISTE.index(saved_sec)
-    else:
-        idx = 0
+    idx = utils.SECTEURS_LISTE.index(saved_sec) if saved_sec in utils.SECTEURS_LISTE else 0
     st.session_state['secteur'] = st.selectbox("Secteur (Vulnérabilité)", utils.SECTEURS_LISTE, index=idx)
 
 st.divider()
 
 # Mode Valo
 modes = ["PME (Bilan)", "Cotée (Bourse)", "Startup"]
-try:
-    idx_m = modes.index(st.session_state.get('mode_valo', modes[0]))
+try: idx_m = modes.index(st.session_state.get('mode_valo', modes[0]))
 except: idx_m = 0
 mode = st.radio("Mode", modes, index=idx_m, horizontal=True)
 st.session_state['mode_valo'] = mode
@@ -55,21 +50,23 @@ if mode == "PME (Bilan)":
     st.session_state['valo_finale'] = st.session_state['ca'] * m
 
 elif mode == "Cotée (Bourse)":
-    tick = st.text_input("Ticker (ex: BN.PA)", value=st.session_state.get('ticker_input', 'BN.PA'))
+    # Changement ici : On encourage les tickers US
+    tick = st.text_input("Ticker (ex: TSLA, AAPL, AIR.PA)", value=st.session_state.get('ticker_input', ''))
     st.session_state['ticker_input'] = tick
     
     if st.button("Chercher Yahoo"):
-        # CETTE LIGNE EST MAINTENANT SÉCURISÉE PAR UTILS V51
-        val, nom, sec, full_t = utils.get_yahoo_data(tick)
-        
-        if val > 0:
-            st.session_state['valo_finale'] = val
-            st.session_state['ent_name'] = nom
-            st.session_state['ca'] = val * 0.5 # Estimation simple
-            st.success(f"Trouvé: {nom} ({val:,.0f}€)")
-            st.rerun()
-        else:
-            st.error("Introuvable (Essayez le code complet ex: AIR.PA)")
+        with st.spinner("Recherche Bourse..."):
+            # Appel à la fonction corrigée (renvoie 4 valeurs)
+            val, nom, sec, full_t = utils.get_yahoo_data(tick)
+            
+            if val > 0:
+                st.session_state['valo_finale'] = val
+                st.session_state['ent_name'] = nom
+                st.session_state['ca'] = val * 0.4 # Est.
+                st.success(f"Trouvé: {nom} (Secteur: {sec}) | Valo: {val:,.0f}€")
+                st.rerun()
+            else:
+                st.error("Introuvable. Essayez le code exact (ex: TSLA pour Tesla).")
             
     st.session_state['valo_finale'] = st.number_input("Valo", value=float(st.session_state['valo_finale']))
 
