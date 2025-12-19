@@ -19,7 +19,7 @@ from staticmap import StaticMap, CircleMarker
 
 matplotlib.use('Agg')
 
-# --- 1. INITIALISATION MEMOIRE ROBUSTE ---
+# --- 1. INITIALISATION MEMOIRE ---
 def init_session():
     defaults = {
         'ent_name': "Nouvelle Entreprise",
@@ -33,70 +33,149 @@ def init_session():
         'lat': 48.8566, 'lon': 2.3522,
         'climat_calcule': False,
         'map_id': 0,
-        # Risques 360 (Inputs)
+        # Risques 360
         'vol_eau': 50000.0, 'prix_eau': 4.5,
         'part_fournisseur_risk': 30.0, 'energie_conso': 100000.0,
         'reut_invest': False,
-        # Risques 360 (Résultats pour PDF)
-        'risks_360_dict': {}, 
-        'risks_360_total': 0.0,
-        # Data Externe
+        'risks_360_dict': {}, 'risks_360_total': 0.0,
+        # Data
         'news': [], 'wiki_summary': "Pas de données.", 'weather_info': None
     }
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
 
-SECTEURS = {"Agroalimentaire (100%)": 1.0, "Chimie (85%)": 0.85, "Industrie (80%)": 0.8, "Énergie (70%)": 0.7, "BTP (60%)": 0.6, "Services (10%)": 0.1}
+# --- 2. LISTE COMPLETE DES SECTEURS (NOUVEAU) ---
+SECTEURS = {
+    # TRES HAUT RISQUE (0.9 - 1.0)
+    "Agroalimentaire / Boissons (100%)": 1.0,
+    "Agriculture / Élevage (100%)": 1.0,
+    "Semi-conducteurs / Puces (95%)": 0.95,
+    "Mines & Extraction (90%)": 0.9,
+    "Papier & Carton (90%)": 0.9,
+    
+    # HAUT RISQUE (0.7 - 0.85)
+    "Chimie / Pétrochimie (85%)": 0.85,
+    "Textile / Cuir / Habillement (80%)": 0.8,
+    "Industrie Lourde / Métallurgie (80%)": 0.8,
+    "Énergie (Thermique/Nucléaire) (75%)": 0.75,
+    "Data Centers / Cloud (70%)": 0.7,
+    "Matériaux de Construction (Ciment) (70%)": 0.7,
+    
+    # RISQUE MOYEN (0.4 - 0.6)
+    "Pharmaceutique / Biotech (60%)": 0.6,
+    "BTP / Construction (60%)": 0.6,
+    "Automobile (Fabrication) (55%)": 0.55,
+    "Tourisme / Hôtellerie / Loisirs (50%)": 0.5,
+    "Transport / Logistique (50%)": 0.5,
+    "Luxe / Cosmétiques (45%)": 0.45,
+    "Commerce de Détail / Retail (40%)": 0.4,
+    "Immobilier (Exploitation) (40%)": 0.4,
+    
+    # RISQUE FAIBLE (0.1 - 0.3)
+    "Électronique Grand Public (30%)": 0.3,
+    "Santé / Hôpitaux (30%)": 0.3,
+    "Télécoms (Réseau) (25%)": 0.25,
+    "Banque / Assurance (15%)": 0.15,
+    "Services / Logiciel / IT (10%)": 0.1,
+    "Consulting / Audit (5%)": 0.05,
+    "Autre (50%)": 0.5
+}
 SECTEURS_LISTE = list(SECTEURS.keys())
 HEADERS = {'User-Agent': 'AquaRisk/1.0'}
 
-# --- 2. MOTEUR DE CALCUL VERIFIÉ ---
+# --- 3. CALCULS ---
 def calculate_dynamic_score(lat, lon):
-    # Formule : Base + (Latitude/60) + Bruit stable
     base = 2.0 + (abs(lat) / 60.0)
-    random.seed(int(lat*1000) + int(lon*1000)) # Seed stable par ville
+    random.seed(int(lat*1000) + int(lon*1000))
     noise = random.uniform(-0.2, 0.5)
     s24 = min(max(base + noise, 1.5), 4.2)
-    s30 = min(s24 * 1.25, 5.0) # Projection +25%
+    s30 = min(s24 * 1.25, 5.0)
     return s24, s30
 
 def calculate_360_risks(data, params):
     risks = {}
-    
-    # A. Coût Eau (Direct)
-    # Formule : Volume * Prix * %Hausse
     delta_prix = data['prix_eau'] * (params['hausse_eau_pct'] / 100.0)
     risks['Coût Eau (Exploitation)'] = data['vol_eau'] * delta_prix
 
-    # B. Supply Chain (Indirect)
-    # Formule : CA * Part_Achats(40%) * Part_Risk * Impact_Geo
-    achats_estimes = data['ca'] * 0.40
-    part_exposee = achats_estimes * (data['part_fournisseur_risk'] / 100.0)
+    achats = data['ca'] * 0.40
+    part_exposee = achats * (data['part_fournisseur_risk'] / 100.0)
     risks['Supply Chain (Rupture)'] = part_exposee * (params['impact_geopolitique'] / 100.0)
 
-    # C. Réglementaire (CAPEX forcé)
-    # Formule : Si pas REUT -> Coût station épuration (1500€/m3_jour) * Proba
     if not data['reut_invest']:
         vol_jour = data['vol_eau'] / 300
-        cout_mise_norme = vol_jour * 1500.0
-        risks['Conformité (CAPEX forcé)'] = cout_mise_norme * (params['pression_legale'] / 100.0)
-    else:
-        risks['Conformité (CAPEX forcé)'] = 0.0
+        risks['Conformité (CAPEX)'] = (vol_jour * 1500.0) * (params['pression_legale'] / 100.0)
+    else: risks['Conformité (CAPEX)'] = 0.0
 
-    # D. Image (Valo)
-    # Formule : Valo * %Perte
-    risks['Réputation (Impact Valo)'] = data['valo_finale'] * (params['risque_image'] / 100.0)
-
-    # E. Énergie
-    # Formule : (Conso * 15% lié à l'eau) * %HaussePrix
-    risks['Énergie (Pompage/Traitement)'] = (data['energie_conso'] * 0.15) * (params['hausse_energie'] / 100.0)
-
+    risks['Réputation (Valo)'] = data['valo_finale'] * (params['risque_image'] / 100.0)
+    risks['Énergie'] = (data['energie_conso'] * 0.15) * (params['hausse_energie'] / 100.0)
+    
     return risks, sum(risks.values())
 
 def calculate_water_footprint(data):
-    return data['vol_eau'] + (data['ca'] * 0.02) # Heuristique simple
+    return data['vol_eau'] + (data['ca'] * 0.02)
 
-# --- 3. CONNECTEURS ---
+# --- 4. DATA EXTERNE (YAHOO CORRIGÉ) ---
+def get_yahoo_data(ticker):
+    """Récupère les données Bourse en renvoyant TOUJOURS 4 valeurs"""
+    try:
+        t = yf.Ticker(ticker)
+        try: name = t.info.get('longName') or t.info.get('shortName')
+        except: name = None
+        
+        # Si pas de nom, on tente avec .PA
+        if not name and not ticker.endswith(".PA"):
+             return get_yahoo_data(ticker + ".PA")
+        
+        mcap = t.info.get('marketCap') or t.fast_info.get('market_cap')
+        sector = t.info.get('sector', 'N/A')
+        
+        # Le return doit contenir exactement 4 éléments
+        return float(mcap or 0), name, sector, ticker
+    except: 
+        # En cas d'erreur totale, on renvoie des valeurs vides mais au bon format
+        return 0.0, None, None, None
+
+def get_pappers_data(query, api_key):
+    if not api_key: return None, "Clé manquante"
+    try:
+        if re.fullmatch(r'\d{9}', query.replace(' ', '')):
+            url = f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={query.replace(' ', '')}"
+            r = requests.get(url, headers=HEADERS, timeout=5)
+        else:
+            r = requests.get("https://api.pappers.fr/v2/recherche", params={"q": query, "api_token": api_key, "par_page": 1}, headers=HEADERS, timeout=5)
+            if r.status_code == 200 and r.json().get('resultats'):
+                siren = r.json()['resultats'][0]['siren']
+                r = requests.get(f"https://api.pappers.fr/v2/entreprise?api_token={api_key}&siren={siren}", headers=HEADERS, timeout=5)
+        
+        if r.status_code != 200: return None, "Introuvable"
+        d = r.json()
+        f = d.get('finances', [{}])[0]
+        stats = {'ca': float(f.get('chiffre_affaires') or 0), 'res': float(f.get('resultat') or 0), 'cap': float(f.get('capitaux_propres') or 0)}
+        return stats, d.get('nom_entreprise', 'Inconnu')
+    except Exception as e: return None, str(e)
+
+def run_ocr_scan(file_obj):
+    stats = {'ca': 0.0, 'res': 0.0, 'cap': 0.0, 'found': False}
+    try:
+        full = ""
+        with pdfplumber.open(file_obj) as pdf:
+            for p in pdf.pages[:20]: full += (p.extract_text() or "") + "\n"
+        text = full.upper()
+        def clean(s): 
+            try: return float(re.sub(r'[^\d,\.-]', '', s).replace(',', '.'))
+            except: return 0.0
+        patterns = {'ca': ["CHIFFRES D'AFFAIRES", "VENTES"], 'res': ["RESULTAT NET", "BENEFICE"], 'cap': ["CAPITAUX PROPRES"]}
+        for k, words in patterns.items():
+            for w in words:
+                if w in text:
+                    nums = re.findall(r'-?\s*(?:\d{1,3}(?:\s\d{3})*|\d+)(?:[\.,]\d+)?', text[text.find(w):text.find(w)+400])
+                    valid = [clean(n) for n in nums if abs(clean(n)) > 1000]
+                    if valid:
+                        stats[k] = max(valid, key=abs) if k == 'ca' else valid[0]
+                        stats['found'] = True; break
+    except: pass
+    return stats, "OK" if stats['found'] else "Rien trouvé"
+
 def get_wiki_summary(name):
     try:
         clean = re.sub(r'\s(SA|SAS|SARL|INC)', '', name, flags=re.IGNORECASE).strip()
@@ -132,9 +211,8 @@ def create_static_map(lat, lon):
             img.save(t.name); return t.name
     except: return None
 
-# --- 4. GENERATEUR PDF COMPLET ---
+# --- 5. GENERATEUR PDF ---
 def generate_pdf_report(data):
-    # Graphique Trajectoire
     chart_path = None
     try:
         fig, ax = plt.subplots(figsize=(6, 2.5))
@@ -149,20 +227,16 @@ def generate_pdf_report(data):
 
     pdf = FPDF()
     pdf.add_page()
-    
-    # TITRE
     pdf.set_font("Arial", 'B', 20); pdf.cell(0, 15, "AUDIT AQUARISK 360", ln=1, align='C')
     pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, str(data.get('ent_name', 'Société')), ln=1, align='C')
     
-    # SYNTHESE
     pdf.ln(5)
     pdf.set_font("Arial", '', 10)
     pdf.cell(95, 8, f"CA: {data.get('ca',0):,.0f} EUR", 1)
     pdf.cell(95, 8, f"Valo: {data.get('valo_finale',0):,.0f} EUR", 1, ln=1)
-    pdf.cell(95, 8, f"Ville: {data.get('ville','?')}", 1)
-    pdf.cell(95, 8, f"Risque Eau 2030: {data.get('s30',0):.2f}/5", 1, ln=1)
+    pdf.cell(95, 8, f"Secteur: {data.get('secteur','?')}", 1)
+    pdf.cell(95, 8, f"Risque 2030: {data.get('s30',0):.2f}/5", 1, ln=1)
 
-    # VISUELS
     pdf.ln(5)
     if map_path:
         try: pdf.image(map_path, x=10, w=90)
@@ -170,13 +244,10 @@ def generate_pdf_report(data):
     if chart_path:
         try: pdf.image(chart_path, x=110, y=pdf.get_y(), w=90)
         except: pass
-    pdf.ln(60) # Saut après images
+    pdf.ln(60)
 
-    # TABLEAU RISQUES 360 (C'est ici que ça manquait)
     pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "SCENARIOS & IMPACTS FINANCIERS", ln=1)
     pdf.set_font("Arial", '', 10)
-    
-    # On récupère le dictionnaire sauvegardé
     risks = data.get('risks_360_dict', {})
     total = data.get('risks_360_total', 0)
     
@@ -188,9 +259,8 @@ def generate_pdf_report(data):
         pdf.cell(140, 7, "TOTAL RISQUE ESTIME", 1)
         pdf.cell(50, 7, f"-{total:,.0f} EUR", 1, ln=1)
     else:
-        pdf.cell(0, 7, "Aucune simulation de risque effectuée (Voir onglet Risques 360).", 1, ln=1)
+        pdf.cell(0, 7, "Aucune simulation (Voir onglet Risques 360).", 1, ln=1)
 
-    # SOURCES
     pdf.ln(5)
     pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "SOURCES & CONTEXTE", ln=1)
     pdf.set_font("Arial", '', 9)
@@ -199,9 +269,17 @@ def generate_pdf_report(data):
     for n in data.get('news', []):
         pdf.cell(0, 5, f"> {n['title']}", ln=1)
 
-    # Nettoyage
     if chart_path and os.path.exists(chart_path): os.remove(chart_path)
     if map_path and os.path.exists(map_path): os.remove(map_path)
     
     return pdf.output(dest='S').encode('latin-1', 'replace')
+
+def generate_excel(data):
+    output = io.BytesIO()
+    wb = xlsxwriter.Workbook(output, {'in_memory': True})
+    ws = wb.add_worksheet()
+    rows = [["Entité", data.get('ent_name')], ["Valo", data.get('valo_finale')], ["VaR", data.get('var_amount')]]
+    for i, r in enumerate(rows): ws.write_row(i, 0, r)
+    wb.close()
+    return output.getvalue()
     
