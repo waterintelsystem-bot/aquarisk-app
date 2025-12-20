@@ -14,3 +14,4 @@ matplotlib
 staticmap
 Pillow
 geopy
+google-generativeai
