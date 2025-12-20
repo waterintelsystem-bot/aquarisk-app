@@ -2,12 +2,14 @@ import streamlit as st
 import utils
 
 utils.init_session()
-st.title("💰 Finance & Identité")
+st.title("💰 Finance & Valorisation")
 
 # Identité
 c1, c2 = st.columns(2)
 with c1: 
-    st.session_state['ent_name'] = st.text_input("Nom Entreprise", st.session_state['ent_name'])
+    # Synchronisation avec le client actif si possible
+    def_name = st.session_state.get('current_client_name', 'Nouvelle Entreprise')
+    st.session_state['ent_name'] = st.text_input("Nom Entreprise", def_name)
 with c2: 
     saved_sec = st.session_state.get('secteur')
     idx = utils.SECTEURS_LISTE.index(saved_sec) if saved_sec in utils.SECTEURS_LISTE else 0
@@ -15,62 +17,38 @@ with c2:
 
 st.divider()
 
-# Mode Valo
-modes = ["PME (Bilan)", "Cotée (Bourse)", "Startup"]
-try: idx_m = modes.index(st.session_state.get('mode_valo', modes[0]))
-except: idx_m = 0
-mode = st.radio("Mode", modes, index=idx_m, horizontal=True)
+# CHOIX DU MODELE (RESTAURÉ)
+modes = ["PME (Bilan)", "Cotée (Bourse)", "Startup (Estimation)"]
+st.subheader("Méthode de Valorisation")
+mode = st.radio("Type d'entreprise", modes, horizontal=True)
 st.session_state['mode_valo'] = mode
 
-if mode == "PME (Bilan)":
-    t1, t2 = st.tabs(["OCR PDF", "Pappers"])
-    with t1:
-        upl = st.file_uploader("PDF", type=["pdf"])
-        if upl and st.button("OCR"):
-            s, m = utils.run_ocr_scan(upl)
-            if s['found']: 
-                st.session_state.update(s)
-                st.success(m)
-    with t2:
-        pk = st.text_input("API Pappers", type="password")
-        q = st.text_input("Nom/SIREN")
-        if st.button("Chercher"):
-            s, n = utils.get_pappers_data(q, pk)
-            if s: 
-                st.session_state.update(s)
-                st.session_state['ent_name'] = n
-                st.success(n); st.rerun()
-
+if "PME" in mode:
+    st.info("💡 Mode PME : Saisissez les données du bilan ou utilisez un multiple du CA.")
     c_ca, c_res, c_cap = st.columns(3)
-    with c_ca: st.session_state['ca'] = st.number_input("CA", value=st.session_state['ca'])
-    with c_res: st.session_state['res'] = st.number_input("Res", value=st.session_state['res'])
-    with c_cap: st.session_state['cap'] = st.number_input("Cap", value=st.session_state['cap'])
+    with c_ca: st.session_state['ca'] = st.number_input("Chiffre d'Affaires (€)", value=float(st.session_state['ca']))
+    with c_res: st.session_state['res'] = st.number_input("Résultat Net (€)", value=float(st.session_state['res']))
+    with c_cap: st.session_state['cap'] = st.number_input("Capitaux Propres (€)", value=float(st.session_state['cap']))
     
-    m = st.slider("Multiple CA", 0.1, 5.0, 1.0)
+    m = st.slider("Multiple de Valorisation (x CA)", 0.1, 5.0, 1.0)
     st.session_state['valo_finale'] = st.session_state['ca'] * m
 
-elif mode == "Cotée (Bourse)":
-    # Changement ici : On encourage les tickers US
-    tick = st.text_input("Ticker (ex: TSLA, AAPL, AIR.PA)", value=st.session_state.get('ticker_input', ''))
-    st.session_state['ticker_input'] = tick
-    
-    if st.button("Chercher Yahoo"):
-        with st.spinner("Recherche Bourse..."):
-            # Appel à la fonction corrigée (renvoie 4 valeurs)
-            val, nom, sec, full_t = utils.get_yahoo_data(tick)
-            
-            if val > 0:
-                st.session_state['valo_finale'] = val
-                st.session_state['ent_name'] = nom
-                st.session_state['ca'] = val * 0.4 # Est.
-                st.success(f"Trouvé: {nom} (Secteur: {sec}) | Valo: {val:,.0f}€")
-                st.rerun()
-            else:
-                st.error("Introuvable. Essayez le code exact (ex: TSLA pour Tesla).")
-            
-    st.session_state['valo_finale'] = st.number_input("Valo", value=float(st.session_state['valo_finale']))
+elif "Cotée" in mode:
+    st.info("💡 Mode Bourse : Récupération automatique via Yahoo Finance.")
+    tick = st.text_input("Ticker (ex: AI.PA, BN.PA, TSLA)", value="")
+    if st.button("Chercher Ticker"):
+        val, nom, sec, full_t = utils.get_yahoo_data(tick)
+        if val > 0:
+            st.session_state['valo_finale'] = val
+            st.session_state['ent_name'] = nom
+            st.success(f"Trouvé : {nom} | Valo : {val:,.0f} €")
+            st.rerun()
+        else:
+            st.error("Ticker introuvable.")
+    st.metric("Valorisation Boursière", f"{st.session_state['valo_finale']:,.0f} €")
 
-else:
-    st.session_state['valo_finale'] = st.slider("Valo Startup", 1e6, 100e6, 5e6)
+elif "Startup" in mode:
+    st.info("💡 Mode Startup : Estimation manuelle.")
+    st.session_state['valo_finale'] = st.slider("Valorisation Estimée (€)", 1_000_000, 100_000_000, 5_000_000, step=1_000_000)
 
-st.info(f"Valo Retenue: {st.session_state['valo_finale']:,.0f} €")
+st.success(f"💰 Valorisation retenue pour l'audit : **{st.session_state['valo_finale']:,.0f} €**")
